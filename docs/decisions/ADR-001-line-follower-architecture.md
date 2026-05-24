@@ -10,11 +10,11 @@ Accepted; refined by ADR-002 and ADR-003
 
 ## Context
 
-项目目标是在 Arduino UNO 兼容、ATmega328P-AU 教学小车板上实现黑线循迹。当前工作区只有 `Car_head.h` 和文档，没有硬件，不能上传或现场调参。
+项目目标是在 Arduino UNO 兼容、ATmega328P-AU 教学小车板上实现黑线循迹。当前没有硬件，不能上传或现场调参。
 
 约束：
 
-- `Car_head.h` 是接线事实来源；符号对应的功能和引脚不能漂移。
+- `Pins.h` 是唯一接线事实来源；功能、Arduino 引脚、AVR 端口位和 ADC 通道不能漂移。
 - 目标优先按 `arduino:avr:uno` 编译；当前 ArduinoCore-avr standard variant 定义 A6/A7 常量，但 A6/A7 不是普通数字 I/O。
 - 电机控制脚是 D3/D5/D9/D10，全部具备 PWM 能力。
 - 左右循迹输出是 A1/A0，使能是 D2/A5。
@@ -26,7 +26,7 @@ Accepted; refined by ADR-002 and ADR-003
 首版采用低资源分层架构，并把控制热路径固定到 AVR 寄存器实现：
 
 - `BoardProfile.h` 约束 UNO/ATmega328P-AU 编译目标，并把 A6/A7 明确为 ADC-only 硬件事实；首版不使用 A6/A7。
-- `Pins.h` 是唯一直接依赖 `Car_head.h` 的项目头，向其它模块提供语义化引脚/通道别名。
+- `Pins.h` 直接承接原接线事实，向其它模块提供语义化引脚、端口位和 ADC 通道别名。
 - `FastIo` 直接操作 DDRx/PORTx/PINx，用于传感器读取和使能控制。
 - `Timer1MotorPwm` 手写初始化 Timer1 CTC，用 Timer1 软件 PWM 驱动 D3/D5/D9/D10，并产生控制 tick。
 - `AdcDriver` 直接操作 `ADMUX`、`ADCSRA`、`ADCL/ADCH`，生产代码不调用 `analogRead()`。
@@ -34,12 +34,12 @@ Accepted; refined by ADR-002 and ADR-003
 - `LineSensors` 封装 EN、OUT、黑线极性和毛刺过滤。
 - `LineEstimator` 将双传感器状态转换为离散误差，并显式标记 ambiguous/intersection/lost。
 - `PidController` 使用整数定点 PID。
-- `RobotController` 负责固定 tick、状态机、差速混控、失线策略和可选低频调试。
-- 主循环使用 `micros()` 的无符号差值调度，不在控制路径使用阻塞等待。
+- `RobotController` 负责消费 Timer1 tick、状态机、差速混控、失线策略和可选低频调试。
+- 主循环只消费 `Timer1MotorPwm::takeControlTicks()`，不依赖 `micros()` 驱动控制闭环。
 
 Arduino API 的边界：
 
-- 允许 `micros()` / `millis()` 用于调度。
+- 允许 `micros()` / `millis()` 用于非控制路径的低频调试时间戳。
 - 允许 `Serial` 作为编译期开关控制的低频调试。
 - 控制路径不使用 `digitalRead()` / `digitalWrite()` / `analogRead()` / `analogWrite()`。
 - Timer0/Timer2 不写；Timer1 是唯一手写初始化的 timer。

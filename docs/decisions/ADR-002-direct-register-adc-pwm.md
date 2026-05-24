@@ -15,7 +15,7 @@ ADR-001 已决定控制热路径使用 AVR 端口寄存器，避免 `digitalRead
 - `analogRead()` 在 AVR 上会做通用 pin 到 ADC channel 的转换、配置 `ADMUX`、启动转换并等待完成。
 - `analogWrite()` 在 AVR 上会做通用 pin 到 timer 的映射，0/255 极值还会走数字输出路径。
 - 本项目只需要固定的 A0/A1 ADC 和 D3/D5/D9/D10 PWM，不需要 Arduino API 的通用映射能力。
-- `Car_head.h` 中 A6/A7 对应 ADC6/ADC7 硬件事实，但不是普通数字 I/O；首版循迹不使用它们。
+- `Pins.h` 保留 A6/A7 为 ADC6/ADC7 硬件事实的说明，但它们不是普通数字 I/O；首版循迹不使用它们。
 
 ## Decision
 

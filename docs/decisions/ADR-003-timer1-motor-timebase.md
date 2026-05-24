@@ -10,7 +10,7 @@ Accepted
 
 ## Context
 
-当前小车板固定使用 `Car_head.h` 中的电机引脚：
+当前小车板固定使用 `Pins.h` 中的电机引脚：
 
 - 左电机：D3/PD3 与 D5/PD5。
 - 右电机：D9/PB1 与 D10/PB2。

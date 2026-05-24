@@ -6,7 +6,7 @@
 
 ## 1. 本轮架构结论
 
-本项目专门针对当前教学小车板开发，不追求跨板可移植性。`Car_head.h` 中“符号 -> 引脚 -> 功能”的对应关系保持不变；实现层可以完全针对 ATmega328P/ArduinoCore-avr standard variant 优化。
+本项目专门针对当前教学小车板开发，不追求跨板可移植性。`Pins.h` 是唯一接线事实源，保存“功能 -> Arduino 引脚 -> AVR 端口/位/ADC 通道”的对应关系；实现层可以完全针对 ATmega328P/ArduinoCore-avr standard variant 优化。
 
 新的硬约束：
 
@@ -21,7 +21,7 @@
 首版成功定义：
 
 - 安装 `arduino:avr` core 后能用 `arduino-cli compile --fqbn arduino:avr:uno --warnings all .` 编译。
-- `Car_head.h` 不被修改，且只有 `Pins.h` 直接依赖它。
+- 旧接线头文件已删除；`Pins.h` 直接承接原引脚功能映射，且其它模块不散落裸引脚号。
 - Timer1 CTC 初始化明确、集中、可审计；Timer0/Timer2 寄存器不被项目代码写入。
 - 电机输出有方向抽象、软启动/斜率限制、死区、失线停车、方向切换低电平保护。
 - 传感器黑线电平、EN 有效电平、中心模式、ADC 阈值、电机极性全部配置化。
@@ -72,22 +72,22 @@
 
 ## 4. 引脚、端口与 Timer 审计
 
-`Car_head.h` 功能对应关系保持不变：
+`Pins.h` 中的功能对应关系：
 
 | 功能 | 符号 | Arduino 引脚 | AVR 端口/位 | 原硬件能力 | 首版使用 |
 |---|---:|---:|---|---|---|
-| 左电机 IB | `IB_LEFT_pin` | D3 | PD3 | OC2B | Timer1 软件 PWM 输出 |
-| 左电机 IA | `IA_LEFT_pin` | D5 | PD5 | OC0B | Timer1 软件 PWM 输出 |
-| 右电机 IB | `IB_RIGHT_pin` | D9 | PB1 | OC1A | Timer1 软件 PWM 输出，OC1A 断开 |
-| 右电机 IA | `IA_RIGHT_pin` | D10 | PB2 | OC1B | Timer1 软件 PWM 输出，OC1B 断开 |
-| 左循迹 EN | `L_SENSOR_EN_pin` | D2 | PD2 | 数字 I/O | 直接写 PORTD2 |
-| 右循迹 EN | `R_SENSOR_EN_pin` | A5 | PC5 | 数字 I/O/ADC5 | 直接写 PORTC5 |
-| 左循迹 OUT | `L_SENSOR_OUT_pin` | A1 | PC1/ADC1 | 数字 I/O/ADC1 | 数字读 PINC1 或直接 ADC1 |
-| 右循迹 OUT | `R_SENSOR_OUT_pin` | A0 | PC0/ADC0 | 数字 I/O/ADC0 | 数字读 PINC0 或直接 ADC0 |
-| BADGE | `BADGE_pin` | A7 | ADC7 only | ADC-only | 首版不用 |
-| 震动 | `VIBRATION_pin` | A6 | ADC6 only | ADC-only | 首版不用 |
-| LED2/蓝牙 tx | `LED2_pin`/`tx_pin` | D11 | PB3/OC2A | 共享 | 首版不用 |
-| 超声波 TRIG/蓝牙 rx | `TRIG_pin`/`rx_pin` | D13 | PB5 | 共享 | 首版不用 |
+| 左电机 IB | `kLeftMotorIbPin` | D3 | PD3 | OC2B | Timer1 软件 PWM 输出 |
+| 左电机 IA | `kLeftMotorIaPin` | D5 | PD5 | OC0B | Timer1 软件 PWM 输出 |
+| 右电机 IB | `kRightMotorIbPin` | D9 | PB1 | OC1A | Timer1 软件 PWM 输出，OC1A 断开 |
+| 右电机 IA | `kRightMotorIaPin` | D10 | PB2 | OC1B | Timer1 软件 PWM 输出，OC1B 断开 |
+| 左循迹 EN | `kLeftSensorEnablePin` | D2 | PD2 | 数字 I/O | 直接写 PORTD2 |
+| 右循迹 EN | `kRightSensorEnablePin` | A5 | PC5 | 数字 I/O/ADC5 | 直接写 PORTC5 |
+| 左循迹 OUT | `kLeftSensorOutPin` | A1 | PC1/ADC1 | 数字 I/O/ADC1 | 数字读 PINC1 或直接 ADC1 |
+| 右循迹 OUT | `kRightSensorOutPin` | A0 | PC0/ADC0 | 数字 I/O/ADC0 | 数字读 PINC0 或直接 ADC0 |
+| BADGE | 已排除 | A7 | ADC7 only | ADC-only | 首版不用 |
+| 震动 | 已排除 | A6 | ADC6 only | ADC-only | 首版不用 |
+| LED2/蓝牙 tx | 已排除 | D11 | PB3/OC2A | 共享 | 首版不用 |
+| 超声波 TRIG/蓝牙 rx | 已排除 | D13 | PB5 | 共享 | 首版不用 |
 
 结论：
 
@@ -293,16 +293,15 @@ correction = clamp(raw / 256, -maxCorrection, +maxCorrection)
 | `LineLost` | 冻结积分，按最后误差低速搜索；超时停车 |
 | `Stopped` | 四路电机输入低，等待复位或未来启动输入 |
 
-当前 `Car_head.h` 没有按键引脚，首版不设计按键启动。
+当前首版接线表没有按键引脚，首版不设计按键启动。
 
 ## 9. 代码结构
 
 ```text
 .
 ├── line-follower.ino
-├── Car_head.h
 ├── BoardProfile.h              # ATmega328P/UNO 编译期断言，A6/A7 ADC-only
-├── Pins.h                      # 唯一包含 Car_head.h 的项目头
+├── Pins.h                      # 唯一接线事实源
 ├── FastIo.h                    # 固定端口位操作
 ├── Timer1MotorPwm.h/.cpp       # Timer1 CTC、软件 PWM、control tick flag
 ├── AdcDriver.h/.cpp            # ADC0/ADC1 直接寄存器读取
@@ -354,11 +353,11 @@ correction = clamp(raw / 256, -maxCorrection, +maxCorrection)
 
 | 驱动侧 | 板侧 |
 |---|---|
-| 左 IA | D5 / `IA_LEFT_pin` |
-| 左 IB | D3 / `IB_LEFT_pin` |
+| 左 IA | D5 / `kLeftMotorIaPin` |
+| 左 IB | D3 / `kLeftMotorIbPin` |
 | 左 OA/OB | 左电机 |
-| 右 IA | D10 / `IA_RIGHT_pin` |
-| 右 IB | D9 / `IB_RIGHT_pin` |
+| 右 IA | D10 / `kRightMotorIaPin` |
+| 右 IB | D9 / `kRightMotorIbPin` |
 | 右 OA/OB | 右电机 |
 | VM/VCC | 按 L9110S-MS/模块/教学板说明接电机电源 |
 | GND | 与 Arduino GND、电池负极共地 |
@@ -379,7 +378,7 @@ correction = clamp(raw / 256, -maxCorrection, +maxCorrection)
 ### Phase 1: 编译骨架
 
 - [ ] 新增 `line-follower.ino`、`BoardProfile.h`、`Pins.h`。
-  - Acceptance：`Pins.h` 唯一包含 `Car_head.h`；编译期断言 ATmega328P、16 MHz、UNO pin map、A6/A7 ADC-only。
+  - Acceptance：`Pins.h` 直接保存功能引脚、端口位和 ADC 通道；编译期断言 ATmega328P、16 MHz、UNO pin map、A6/A7 ADC-only。
   - Verification：`arduino-cli compile --fqbn arduino:avr:uno --warnings all .`
 
 - [ ] 新增 `RobotConfig.h`。
@@ -455,7 +454,7 @@ arduino-cli compile --fqbn arduino:avr:uno --warnings all .
 - 生产代码不得出现 `digitalRead(`、`digitalWrite(`、`analogRead(`、`analogWrite(`。
 - 生产代码不得写 Timer0/Timer2 寄存器。
 - ISR 中不得出现 `Serial`、ADC、PID、动态分配、除法或长循环。
-- `Car_head.h` 不修改。
+- `Pins.h` 是唯一接线事实源，生产代码不直接写裸引脚号。
 
 硬件阶段：
 
@@ -476,7 +475,7 @@ Always：
 
 Ask first：
 
-- 修改 `Car_head.h` 的功能/引脚对应关系。
+- 修改 `Pins.h` 的功能/引脚对应关系。
 - 使用 Timer0 或 Timer2。
 - 加第三方库。
 - 启用 Servo/Tone/SoftwareSerial 等会占用 timer 或实时资源的功能。
@@ -488,7 +487,7 @@ Never：
 - 把 L9110S-MS 峰值电流当连续能力。
 - 把 A6/A7 当普通数字 I/O。
 - 在 ISR 中做串口输出、ADC 阻塞采样或 PID。
-- 为了解决编译问题删除 `Car_head.h` 中的既有接线事实。
+- 为了解决编译问题绕过 `Pins.h` 中的接线事实。
 
 ## 14. 开放问题
 
