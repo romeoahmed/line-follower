@@ -34,11 +34,14 @@ bool readEchoHigh() {
 }
 
 void writeTriggerHigh(const bool high) {
+  const uint8_t oldSreg = SREG;
+  cli();
   if (high) {
     PORTB |= kTriggerMask;
   } else {
     PORTB &= static_cast<uint8_t>(~kTriggerMask);
   }
+  SREG = oldSreg;
 }
 
 void armEchoCapture() {
@@ -67,6 +70,17 @@ void markEchoTimeout() {
     g_captureState = EchoCaptureState::kIdle;
     g_timeoutPending = true;
   }
+  SREG = oldSreg;
+}
+
+void cancelEchoCapture() {
+  const uint8_t oldSreg = SREG;
+  cli();
+  g_captureState = EchoCaptureState::kIdle;
+  g_echoRiseTicks = 0;
+  g_echoPulseTicks = 0;
+  g_pulsePending = false;
+  g_timeoutPending = false;
   SREG = oldSreg;
 }
 
@@ -139,6 +153,22 @@ void beginUltrasonicPinsAndInterrupt() {
 
 void UltrasonicRangeSensor::begin() {
   beginUltrasonicPinsAndInterrupt();
+
+  const uint32_t nowTicks = Timer1MotorPwm::captureTimeTicks();
+  lastTriggerTicks_ = nowTicks - RobotConfig::kUltrasonicMeasurementIntervalTimerTicks;
+  triggerEndTicks_ = 0;
+  triggerHigh_ = false;
+  hasDistance_ = false;
+  obstaclePresent_ = false;
+  distanceMillimeters_ = 0;
+  echoMicroseconds_ = 0;
+  obstacleSamples_ = 0;
+  clearSamples_ = RobotConfig::kObstacleClearSamples;
+}
+
+void UltrasonicRangeSensor::restartAfterManeuver() {
+  writeTriggerHigh(false);
+  cancelEchoCapture();
 
   const uint32_t nowTicks = Timer1MotorPwm::captureTimeTicks();
   lastTriggerTicks_ = nowTicks - RobotConfig::kUltrasonicMeasurementIntervalTimerTicks;

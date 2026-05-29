@@ -30,6 +30,7 @@ class MotorDriver {
   MotorState right_ = {};
 
   static int16_t clampSignedPwm(int16_t value);
+  static int16_t applyCompensation(int16_t value, int16_t trimPermille);
   static int16_t rampToward(int16_t current, int16_t target);
   static void stepMotor(MotorState* state);
   static uint8_t magnitude(int16_t value);

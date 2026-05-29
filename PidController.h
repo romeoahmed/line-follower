@@ -7,7 +7,8 @@ namespace lf {
 class PidController {
  public:
   void reset();
-  int16_t update(int16_t error, bool allowIntegral);
+  int16_t update(int16_t error, const RobotConfig::PidGainsQ8& gains, int16_t maxCorrection,
+                 bool allowIntegral);
 
  private:
   int32_t integral_ = 0;

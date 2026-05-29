@@ -101,7 +101,7 @@ Arduino 官方 API 适合通用 sketch，但本项目的硬件引脚固定，且
 
 ## Verification
 
-- 编译：`arduino-cli compile --fqbn arduino:avr:uno --warnings all .`
+- 工具链可用时编译：`arduino-cli compile --fqbn arduino:avr:uno --warnings all .`
 - 静态搜索：生产代码不出现 `analogRead(`、`analogWrite(`、`digitalRead(`、`digitalWrite(`。
 - 单元测试：ADC channel 选择和 10-bit 组合逻辑；PWM 细节见 ADR-003。
 - 硬件阶段：A0/A1 读数与临时诊断 sketch 对照；D3/D5/D9/D10 点动确认方向和温升。

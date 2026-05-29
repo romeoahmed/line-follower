@@ -118,7 +118,7 @@ Timer1 是 ATmega328P 上的 16-bit timer，足够精细地提供电机 PWM 周�
 - 静态检查：生产代码不写 TCCR0A/B、OCR0A/B、TIMSK0、TCCR2A/B、OCR2A/B、TIMSK2。
 - 静态检查：Timer1 寄存器只在 `Timer1MotorPwm` 中写。
 - 单元测试：duty 到 edge time 映射、edge 排序、0 duty、full duty、direction dead-time、emergency stop。
-- 编译：`arduino-cli compile --fqbn arduino:avr:uno --warnings all .`
+- 工具链可用时编译：`arduino-cli compile --fqbn arduino:avr:uno --warnings all .`
 - 硬件阶段：示波器或逻辑分析仪确认 4 kHz PWM、D3/D5/D9/D10 波形、10 ms control tick。
 
 ## References

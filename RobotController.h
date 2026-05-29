@@ -13,6 +13,7 @@ enum class RobotState : uint8_t {
   kFollowLine,
   kLineLost,
   kObstacleStop,
+  kObstacleTurnRight,
   kStopped,
 };
 
@@ -38,6 +39,8 @@ class RobotController {
   uint8_t settleTicks_ = 0;
   uint8_t ambiguousTicks_ = 0;
   uint8_t lostTicks_ = 0;
+  uint8_t obstacleStopTicks_ = 0;
+  uint16_t obstacleTurnTicks_ = 0;
   uint16_t missedControlTicks_ = 0;
 
   void runControlStep();
@@ -45,8 +48,11 @@ class RobotController {
   void handleFollowLine(const LineEstimate& estimate);
   void handleLineLost(const LineEstimate& estimate);
   void handleObstacleStop();
+  void handleObstacleTurnRight();
   void enterLineLost();
   void enterObstacleStop();
+  void enterObstacleTurnRight();
+  void enterSensorSettle();
   void enterStopped();
   static int16_t clampMotorCommand(int16_t value);
 };

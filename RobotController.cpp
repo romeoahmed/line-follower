@@ -1,6 +1,47 @@
 #include "RobotController.h"
 
 namespace lf {
+namespace {
+
+struct FollowProfile {
+  uint8_t basePwm;
+  int16_t maxCorrection;
+  RobotConfig::PidGainsQ8 gains;
+  bool usePid;
+  bool allowIntegral;
+};
+
+int16_t abs16(const int16_t value) {
+  return (value < 0) ? static_cast<int16_t>(-value) : value;
+}
+
+FollowProfile profileForEstimate(const LineEstimate& estimate, const int16_t lastError) {
+  if (estimate.intersectionLike) {
+    return FollowProfile{RobotConfig::kMotorCautiousPwm, 0, RobotConfig::kPidStraightGainsQ8, false,
+                         false};
+  }
+
+  if (estimate.ambiguous) {
+    const uint8_t base =
+        (lastError == 0) ? RobotConfig::kMotorStraightPwm : RobotConfig::kMotorCautiousPwm;
+    return FollowProfile{base, 0, RobotConfig::kPidStraightGainsQ8, false, false};
+  }
+
+  if (abs16(estimate.error) >= RobotConfig::kLineCurveErrorThreshold) {
+    return FollowProfile{RobotConfig::kMotorCurvePwm, RobotConfig::kPidCurveMaxCorrection,
+                         RobotConfig::kPidCurveGainsQ8, true, true};
+  }
+
+  return FollowProfile{RobotConfig::kMotorStraightPwm, RobotConfig::kPidStraightMaxCorrection,
+                       RobotConfig::kPidStraightGainsQ8, true, true};
+}
+
+bool ambiguousCenterTimedOut(const uint8_t ticks, const int16_t lastError) {
+  return RobotConfig::kAmbiguousCenterLimitTicks > 0 && lastError != 0 &&
+         ticks > RobotConfig::kAmbiguousCenterLimitTicks;
+}
+
+} // namespace
 
 void RobotController::begin() {
   state_ = RobotState::kBoot;
@@ -13,6 +54,8 @@ void RobotController::begin() {
   settleTicks_ = 0;
   ambiguousTicks_ = 0;
   lostTicks_ = 0;
+  obstacleStopTicks_ = 0;
+  obstacleTurnTicks_ = 0;
   lastError_ = 0;
   missedControlTicks_ = 0;
   state_ = RobotState::kSensorSettle;
@@ -42,6 +85,11 @@ void RobotController::runControlStep() {
     return;
   }
 
+  if (state_ == RobotState::kObstacleTurnRight) {
+    handleObstacleTurnRight();
+    return;
+  }
+
   if (RobotConfig::kObstacleAvoidanceEnabled && ultrasonic_.obstaclePresent()) {
     enterObstacleStop();
     return;
@@ -64,6 +112,9 @@ void RobotController::runControlStep() {
     break;
   case RobotState::kObstacleStop:
     handleObstacleStop();
+    break;
+  case RobotState::kObstacleTurnRight:
+    handleObstacleTurnRight();
     break;
   case RobotState::kStopped:
     motors_.setTargetSpeeds(0, 0);
@@ -101,22 +152,26 @@ void RobotController::handleFollowLine(const LineEstimate& estimate) {
     if (ambiguousTicks_ < 255) {
       ++ambiguousTicks_;
     }
-    if (ambiguousTicks_ > RobotConfig::kAmbiguousCenterLimitTicks) {
+    if (ambiguousCenterTimedOut(ambiguousTicks_, lastError_)) {
       enterLineLost();
       return;
     }
   } else {
     ambiguousTicks_ = 0;
+  }
+
+  if (!estimate.ambiguous && !estimate.intersectionLike) {
     lastError_ = estimate.error;
   }
 
-  // 双数字传感器信息量有限：疑似居中/交叉时保留速度，但冻结积分。
+  const FollowProfile profile = profileForEstimate(estimate, lastError_);
   const int16_t correction =
-      pid_.update(estimate.error, !estimate.ambiguous && !estimate.intersectionLike);
-  const int16_t left =
-      clampMotorCommand(static_cast<int16_t>(RobotConfig::kMotorBasePwm) + correction);
-  const int16_t right =
-      clampMotorCommand(static_cast<int16_t>(RobotConfig::kMotorBasePwm) - correction);
+      profile.usePid
+          ? pid_.update(estimate.error, profile.gains, profile.maxCorrection, profile.allowIntegral)
+          : 0;
+  const int16_t base = profile.basePwm;
+  const int16_t left = clampMotorCommand(static_cast<int16_t>(base + correction));
+  const int16_t right = clampMotorCommand(static_cast<int16_t>(base - correction));
 
   motors_.setTargetSpeeds(left, right);
   motors_.update();
@@ -155,17 +210,28 @@ void RobotController::handleLineLost(const LineEstimate& estimate) {
 }
 
 void RobotController::handleObstacleStop() {
-  if (RobotConfig::kObstacleAvoidanceEnabled && ultrasonic_.obstaclePresent()) {
-    motors_.stopNow();
+  motors_.stopNow();
+
+  if (obstacleStopTicks_ < RobotConfig::kObstacleStopHoldControlTicks) {
+    ++obstacleStopTicks_;
     return;
   }
 
-  settleTicks_ = 0;
-  ambiguousTicks_ = 0;
-  lostTicks_ = 0;
-  lastError_ = 0;
-  pid_.reset();
-  state_ = RobotState::kSensorSettle;
+  enterObstacleTurnRight();
+}
+
+void RobotController::handleObstacleTurnRight() {
+  if (obstacleTurnTicks_ >= RobotConfig::kObstacleRightTurnControlTicks) {
+    motors_.stopNow();
+    ultrasonic_.restartAfterManeuver();
+    enterSensorSettle();
+    return;
+  }
+
+  motors_.setTargetSpeeds(RobotConfig::kObstacleRightTurnPwm,
+                          -static_cast<int16_t>(RobotConfig::kObstacleRightTurnPwm));
+  motors_.update();
+  ++obstacleTurnTicks_;
 }
 
 void RobotController::enterLineLost() {
@@ -179,8 +245,28 @@ void RobotController::enterObstacleStop() {
   state_ = RobotState::kObstacleStop;
   ambiguousTicks_ = 0;
   lostTicks_ = 0;
+  obstacleStopTicks_ = 0;
+  obstacleTurnTicks_ = 0;
   pid_.reset();
   motors_.stopNow();
+}
+
+void RobotController::enterObstacleTurnRight() {
+  state_ = RobotState::kObstacleTurnRight;
+  obstacleTurnTicks_ = 0;
+  pid_.reset();
+  ultrasonic_.restartAfterManeuver();
+}
+
+void RobotController::enterSensorSettle() {
+  settleTicks_ = 0;
+  ambiguousTicks_ = 0;
+  lostTicks_ = 0;
+  obstacleStopTicks_ = 0;
+  obstacleTurnTicks_ = 0;
+  lastError_ = 0;
+  pid_.reset();
+  state_ = RobotState::kSensorSettle;
 }
 
 void RobotController::enterStopped() {

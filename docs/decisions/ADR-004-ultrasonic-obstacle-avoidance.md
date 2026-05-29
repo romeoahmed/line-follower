@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Accepted; obstacle response refined by ADR-005
 
 ## Date
 
@@ -40,9 +40,9 @@ Accepted
 - 时间戳来自 `Timer1MotorPwm::captureTimeTicksFromIsr()`，使用当前 Timer1 CTC 时基的 0.5 us 分辨率。
 - `Timer1MotorPwm` 新增只读时间戳 API；不改变 PWM 频率、prescaler、control tick 或 edge 调度策略。
 - 主循环非阻塞地产生 TRIG 脉冲、处理 Echo timeout、换算距离并维护避障 latch。
-- 默认 60 ms 发起一次测距，Echo timeout 38 ms，连续 2 次距离小于等于 200 mm 进入 `ObstacleStop`，连续 2 次清空后回到 `SensorSettle`。
+- 默认 60 ms 发起一次测距，Echo timeout 38 ms，连续 2 次距离小于等于 200 mm 进入 `ObstacleStop`。ADR-005 后，解除方式不再是等待连续清空，而是短暂停车后执行开环右转避障。
 
-`RobotController` 新增 `ObstacleStop` 状态。避障触发时立即 `motors_.stopNow()`，清空 PID 和失线计数；障碍解除后重新走传感器稳定阶段，再进入循迹。
+`RobotController` 新增 `ObstacleStop` 状态。避障触发时立即 `motors_.stopNow()`，清空 PID 和失线计数。ADR-005 进一步增加 `ObstacleTurnRight`，避障动作改为固定右转后重新走传感器稳定阶段。
 
 ## Rationale
 
@@ -124,7 +124,7 @@ D12 不是 UNO 外部中断脚，不能用 `attachInterrupt()` 得到清晰的�
 
 ## Verification
 
-- 编译：`arduino-cli compile --fqbn arduino:avr:uno --warnings all .`
+- 工具链可用时编译：`arduino-cli compile --fqbn arduino:avr:uno --warnings all .`
 - 静态搜索：生产代码不出现 `pulseIn(`、`delay(`、`delayMicroseconds(`。
 - 静态搜索：项目代码不写 Timer0/Timer2 寄存器。
 - 静态搜索：Timer1 寄存器写入仍集中在 `Timer1MotorPwm.cpp`。

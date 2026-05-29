@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted; refined by ADR-002 and ADR-003
+Accepted; refined by ADR-002, ADR-003, ADR-004, and ADR-005
 
 ## Date
 
@@ -44,7 +44,7 @@ Arduino API 的边界：
 - 控制路径不使用 `digitalRead()` / `digitalWrite()` / `analogRead()` / `analogWrite()`。
 - Timer0/Timer2 不写；Timer1 是唯一手写初始化的 timer。
 
-首版排除蓝牙、超声波、摄像头、显示屏、蜂鸣器和其它非循迹核心模块。
+本 ADR 初始版本排除蓝牙、超声波、摄像头、显示屏、蜂鸣器和其它非循迹核心模块。后续 ADR-004 在固定 D12/D13 接线上加入非阻塞超声波测距；ADR-005 将避障动作定义为开环右转。
 
 ## Rationale
 
@@ -144,7 +144,7 @@ Arduino API 的边界：
 
 ## Verification
 
-- 编译：`arduino-cli compile --fqbn arduino:avr:uno --warnings all .`
+- 工具链可用时编译：`arduino-cli compile --fqbn arduino:avr:uno --warnings all .`
 - 静态搜索：生产代码不出现 `digitalRead(`、`digitalWrite(`、`analogRead(`、`analogWrite(`、`String`、动态分配。
 - 逻辑测试：PID、ramp、线位映射、状态机用 host C++ 测试覆盖。
 - 硬件阶段：按技术规范完成传感器极性、电机方向、最低 PWM、温升和电池压降校准。
@@ -154,6 +154,8 @@ Arduino API 的边界：
 - 技术规范：`docs/line-follower-plan-and-spec.md`
 - ADR-002：`docs/decisions/ADR-002-direct-register-adc-pwm.md`
 - ADR-003：`docs/decisions/ADR-003-timer1-motor-timebase.md`
+- ADR-004：`docs/decisions/ADR-004-ultrasonic-obstacle-avoidance.md`
+- ADR-005：`docs/decisions/ADR-005-layered-control-and-right-turn-obstacle.md`
 - Arduino UNO Rev3：https://docs.arduino.cc/hardware/uno-rev3/
 - ArduinoCore-avr standard pins：https://github.com/arduino/ArduinoCore-avr/blob/master/variants/standard/pins_arduino.h
 - ArduinoCore-avr wiring_analog：https://github.com/arduino/ArduinoCore-avr/blob/master/cores/arduino/wiring_analog.c

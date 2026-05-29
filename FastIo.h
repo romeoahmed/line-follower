@@ -3,6 +3,8 @@
 #include "Pins.h"
 #include "RobotConfig.h"
 
+#include <avr/interrupt.h>
+
 namespace lf {
 namespace FastIo {
 
@@ -17,6 +19,8 @@ inline bool isActiveHigh(const ActiveLevel level) {
 
 inline void writeSensorEnable(const bool enabled) {
   const bool driveHigh = (enabled == isActiveHigh(RobotConfig::kSensorEnableActiveLevel));
+  const uint8_t oldSreg = SREG;
+  cli();
   if (driveHigh) {
     PORTD |= kLeftSensorEnableMask;
     PORTC |= kRightSensorEnableMask;
@@ -24,6 +28,7 @@ inline void writeSensorEnable(const bool enabled) {
     PORTD &= static_cast<uint8_t>(~kLeftSensorEnableMask);
     PORTC &= static_cast<uint8_t>(~kRightSensorEnableMask);
   }
+  SREG = oldSreg;
 }
 
 inline void beginSensorPins() {

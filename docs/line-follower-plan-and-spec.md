@@ -1,7 +1,7 @@
 # 黑线循迹小车计划与技术规范
 
-状态：Draft  
-日期：2026-05-24  
+状态：Draft
+日期：2026-05-29
 范围：Arduino UNO 兼容、ATmega328P-AU 教学小车板的源码实现计划、接线规范、验证规范；当前没有硬件，不上传、不实跑。
 
 ## 1. 本轮架构结论
@@ -18,13 +18,13 @@
 - Timer1 同时提供电机 PWM 周期和 10 ms 控制 tick；主循环只消费 Timer1 ISR 置位的 tick 标志。
 - ADC 生产路径直接操作 `ADMUX`、`ADCSRA`、`ADCL/ADCH`；只读 A0/A1，A6/A7 保留为 ADC-only 硬件事实但首版不用。
 
-首版成功定义：
+当前成功定义：
 
-- 安装 `arduino:avr` core 后能用 `arduino-cli compile --fqbn arduino:avr:uno --warnings all .` 编译。
+- 工具链可用时应能用 `arduino-cli compile --fqbn arduino:avr:uno --warnings all .` 编译；当前环境没有 `arduino-cli`，本轮验收只做静态审计。
 - 旧接线头文件已删除；`Pins.h` 直接承接原引脚功能映射，且其它模块不散落裸引脚号。
 - Timer1 CTC 初始化明确、集中、可审计；Timer0/Timer2 寄存器不被项目代码写入。
-- 电机输出有方向抽象、软启动/斜率限制、死区、失线停车、方向切换低电平保护。
-- 传感器黑线电平、EN 有效电平、中心模式、ADC 阈值、电机极性全部配置化。
+- 电机输出有方向抽象、软启动/斜率限制、可选最低有效 PWM、左右补偿、失线停车、方向切换低电平保护。
+- 传感器黑线电平、EN 有效电平、中心模式、ADC 阈值、电机极性、分层速度、PID profile、开环右转避障参数全部配置化。
 - 静态搜索能证明生产代码没有 Arduino 高层 I/O API、动态分配、`String` 和控制路径阻塞。
 
 ## 2. 官方资料与可信度
@@ -62,7 +62,7 @@
 | Timer2 | ArduinoCore-avr 初始化为 PWM 可用 timer | 项目不用 Timer2，D3 不使用 OC2B |
 | 引脚常量 | standard variant 定义 A6/A7 常量，但 `NUM_ANALOG_INPUTS` 为 6，A6/A7 不是普通数字 I/O | A6/A7 只作为 ADC6/ADC7 事实保留，首版不用 |
 | L9110S-MS | LCSC 页面标注 SOP-8、2.5-12 V、1.2 A continuous、2.0 A peak | 默认低速、限幅、斜率限制；不把峰值当连续能力 |
-| HC-SR04/SR04 超声波 | SparkFun datasheet 标注 5 V、约 15 mA、2-400 cm、约 15 度测量角、10 us TRIG、Echo 输出与距离成比例 | 默认 60 ms 周期、38 ms Echo 超时、200 mm 避障阈值、连续样本确认 |
+| HC-SR04/SR04 超声波 | SparkFun datasheet 标注 5 V、约 15 mA、2-400 cm、约 15 度测量角、10 us TRIG、Echo 输出与距离成比例 | 默认 60 ms 周期、38 ms Echo 超时、200 mm 避障阈值、连续样本确认后开环右转 |
 
 ### 3.2 未确认
 
@@ -70,6 +70,7 @@
 |---|---|---|
 | 循迹传感器型号、供电、电平、EN 极性 | 输入反相或模块未启用 | `SensorBlackLevel`、`SensorEnableActiveLevel` 配置化 |
 | 两个传感器安装几何 | 双白/双黑居中不同 | `CenterMode` 配置化 |
+| 轮距、轮径、减速比和地面摩擦 | 无编码器/陀螺仪时不能闭环保证 90° | `kObstacleRightTurnControlTicks` 只能通过实车标定逼近 90° |
 | 电机额定电压、堵转电流、减速比 | 驱动过热、电池压降、复位 | 首次点动低 PWM，硬件阶段测温/测压 |
 | 电池盒节数和化学类型 | 过压/欠压/供电能力不足 | 固件不假设；接线前实测 |
 | 教学板 USB 与电池电源路径 | 反灌或电机干扰上传 | 没有说明时，上传/调试关闭电机电源 |
@@ -236,7 +237,7 @@ value = (ADCH << 8) | ADCL
 - D12 不是 UNO `attachInterrupt()` 支持的外部中断脚，因此直接使用 ATmega328P PCINT0/PB4 捕获 Echo 上升沿和下降沿。
 - 时间戳来自 `Timer1MotorPwm::captureTimeTicks()`，分辨率 0.5 us；不新增 Timer0/Timer2 用途。
 - PCINT ISR 只读 PINB、捕获 Timer1 时间戳和设置 pending flag；距离换算、确认计数和状态机都在主循环完成。
-- 默认连续 2 次测得距离小于等于 200 mm 才进入 `ObstacleStop`；连续 2 次清空后回到 `SensorSettle`，再恢复循迹。
+- 默认连续 2 次测得距离小于等于 200 mm 才进入 `ObstacleStop`；短暂停车后进入 `ObstacleTurnRight`，以低速开环右转约 90°，随后重新进入 `SensorSettle`。
 
 ## 8. L9110S-MS 电机驱动策略
 
@@ -249,7 +250,8 @@ value = (ADCH << 8) | ADCL
 固件保守策略：
 
 - 不把 1.2 A 当作本 PCB 的持续运行保证；散热和电机堵转电流必须硬件阶段确认。
-- 默认 `basePwm` 低、`maxPwm` 保守、`rampStepPerControlTick` 小。
+- 默认直线、弯道、保守和寻线速度分层，`maxPwm` 保守，`rampStepPerControlTick` 小。
+- 左右电机 trim 和最低有效 PWM 默认关闭，只在实测两侧速度差或启动死区后启用。
 - `speed = 0` 时两个输入都低，滑行停转。
 - 不使用两输入同时高的刹车模式作为常规控制。
 - 每侧任一时刻最多一个输入参与 PWM。
@@ -274,13 +276,13 @@ Timer1 每 40 个 PWM 周期置位一次 `controlTickDue`。主循环看到 flag
 
 1. 非阻塞轮询超声波 TRIG/ECHO 状态机。
 2. 清 flag。
-3. 若避障 latch 生效，立即进入 `ObstacleStop`。
+3. 若避障 latch 生效，立即进入 `ObstacleStop`，再按固定时长开环右转。
 4. 读取循迹传感器。
 5. 更新线位估计。
 6. 更新状态机。
-7. 计算 PID。
-8. 混控左右目标速度。
-9. 应用 trim、限幅、ramp、方向空档。
+7. 按线位状态选择直线、弯道或保守 profile。
+8. 用该 profile 的 Q8 PID 增益和输出限幅计算修正量。
+9. 混控左右目标速度，并应用 trim、限幅、ramp、方向空档。
 10. 提交下一周期 PWM 影子缓冲。
 
 主循环不得补跑历史 tick；如果错过 tick，只记录 missed counter，下一轮使用最新状态。
@@ -298,7 +300,7 @@ Timer1 每 40 个 PWM 周期置位一次 `controlTickDue`。主循环看到 flag
 | `OnLine` | 白 | 黑 | 偏右 | +1000 |
 | `OnLine` | 白 | 白 | 明确失线候选 | invalid |
 
-双数字传感器无法凭单帧读数解决所有歧义；失线策略必须结合历史误差、持续时间和速度限制。
+双数字传感器无法凭单帧读数解决所有歧义；`BetweenSensors` 模式下双白可能是正常居中，也可能是白底丢线。默认不只凭双白持续时间强行判定失线，`kAmbiguousCenterLimitTicks = 0` 表示关闭这个启发式；如果赛道没有长直线双白居中场景，才建议设置为正数。
 
 ### 9.3 PID
 
@@ -314,9 +316,11 @@ correction = clamp(raw / 256, -maxCorrection, +maxCorrection)
 规则：
 
 - 中间值 `int32_t`。
+- 直线和弯道使用不同 `PidGainsQ8` 与 `maxCorrection`；当前双数字传感器只能做离散 profile 切换，不能构造真实连续线位。
 - `ki` 初始 0。
 - 输出饱和时冻结或回退积分。
 - 失线、停车、模式切换时 reset/freeze 积分。
+- 双白中心候选和交叉/宽线候选不更新 PID，只保持保守直行或低速直行。
 
 ### 9.4 状态机
 
@@ -325,10 +329,13 @@ correction = clamp(raw / 256, -maxCorrection, +maxCorrection)
 | `Boot` | 端口安全初始化，Timer1 未启动前四路电机低 |
 | `TimerReady` | Timer1 CTC/PWM 启动，PWM shadow 全 0 |
 | `SensorSettle` | EN 生效后等待传感器稳定 |
-| `FollowLine` | PID 差速循迹 |
+| `FollowLine` | 分层速度和可变 Q8 PID 差速循迹 |
 | `LineLost` | 冻结积分，按最后误差低速搜索；超时停车 |
-| `ObstacleStop` | 超声波连续确认近距离障碍后立即拉低电机；障碍清空后重新进入传感器稳定阶段 |
+| `ObstacleStop` | 超声波连续确认近距离障碍后立即拉低电机，并保持短暂停车 |
+| `ObstacleTurnRight` | 左轮前进、右轮后退，按标定 tick 开环右转约 90° |
 | `Stopped` | 四路电机输入低，等待复位或未来启动输入 |
+
+没有轮速编码器、IMU 或舵机扫描时，固件无法从几何上闭环证明“正好 90°”。当前做法是把动作定义为可标定开环右转：实车用低速原地转向测出接近 90° 的时间，再写入 `kObstacleRightTurnControlTicks`。
 
 当前首版接线表没有按键引脚，首版不设计按键启动。
 
@@ -342,20 +349,21 @@ correction = clamp(raw / 256, -maxCorrection, +maxCorrection)
 ├── FastIo.h                    # 固定端口位操作
 ├── Timer1MotorPwm.h/.cpp       # Timer1 CTC、软件 PWM、control tick flag
 ├── AdcDriver.h/.cpp            # ADC0/ADC1 直接寄存器读取
-├── RobotConfig.h               # 所有配置
-├── MotorDriver.h/.cpp          # 有符号速度、方向、ramp、dead-time
+├── RobotConfig.h               # 所有速度、PID、避障、传感器和电机配置
+├── MotorDriver.h/.cpp          # 有符号速度、方向、trim、ramp、dead-time
 ├── LineSensors.h/.cpp          # EN/OUT、数字/ADC、极性、滤波
 ├── LineEstimator.h/.cpp
-├── PidController.h/.cpp
+├── PidController.h/.cpp        # Q8 PID，增益/限幅由控制 profile 传入
 ├── UltrasonicRangeSensor.h/.cpp # PCINT Echo 捕获、Timer1 时间戳、避障 latch
-├── RobotController.h/.cpp
+├── RobotController.h/.cpp      # 分层循迹、失线搜索、开环右转避障
 └── docs/
     ├── line-follower-plan-and-spec.md
     └── decisions/
         ├── ADR-001-line-follower-architecture.md
         ├── ADR-002-direct-register-adc-pwm.md
         ├── ADR-003-timer1-motor-timebase.md
-        └── ADR-004-ultrasonic-obstacle-avoidance.md
+        ├── ADR-004-ultrasonic-obstacle-avoidance.md
+        └── ADR-005-layered-control-and-right-turn-obstacle.md
 ```
 
 模块边界：
@@ -435,10 +443,10 @@ correction = clamp(raw / 256, -maxCorrection, +maxCorrection)
 
 - [ ] 新增 `line-follower.ino`、`BoardProfile.h`、`Pins.h`。
   - Acceptance：`Pins.h` 直接保存功能引脚、端口位和 ADC 通道；编译期断言 ATmega328P、16 MHz、UNO pin map、A6/A7 ADC-only。
-  - Verification：`arduino-cli compile --fqbn arduino:avr:uno --warnings all .`
+  - Verification：工具链可用时运行 `arduino-cli compile --fqbn arduino:avr:uno --warnings all .`
 
 - [ ] 新增 `RobotConfig.h`。
-  - Acceptance：Timer1、PWM、PID、传感器极性、电机极性、超声波测距和避障阈值全部集中配置。
+  - Acceptance：Timer1、PWM、分层速度、PID profile、传感器极性、电机极性、超声波测距和开环右转避障参数全部集中配置。
   - Verification：`static_assert` 检查 `timer1PwmTop`、控制周期、PWM 范围。
 
 ### Phase 2: Timer1 与底层 I/O
@@ -452,7 +460,7 @@ correction = clamp(raw / 256, -maxCorrection, +maxCorrection)
   - Verification：不调用 `digitalRead()`、`digitalWrite()`、`analogRead()`。
 
 - [ ] 实现 `UltrasonicRangeSensor`。
-  - Acceptance：D13 非阻塞 TRIG；D12 PCINT 捕获 Echo；Timer1 时间戳换算距离；连续样本避障 latch。
+  - Acceptance：D13 非阻塞 TRIG；D12 PCINT 捕获 Echo；Timer1 时间戳换算距离；连续样本避障 latch；避障机动后可丢弃旧测距结果并重新开始测距周期。
   - Verification：不使用 `pulseIn()`、`delay()`、`delayMicroseconds()`，不写 Timer0/Timer2。
 
 Checkpoint：底层硬件路径可编译，电机默认安全低电平。
@@ -460,7 +468,7 @@ Checkpoint：底层硬件路径可编译，电机默认安全低电平。
 ### Phase 3: 电机与传感器抽象
 
 - [ ] 实现 `MotorDriver`。
-  - Acceptance：有符号速度、限幅、ramp、方向反转、方向切换 dead-time、失控停车。
+  - Acceptance：有符号速度、限幅、左右 trim、最低有效 PWM、ramp、方向反转、方向切换 dead-time、失控停车。
   - Verification：host 测试 clamp/ramp/dead-time/submit mask。
 
 - [ ] 实现 `LineSensors`。
@@ -474,7 +482,7 @@ Checkpoint：底层硬件路径可编译，电机默认安全低电平。
   - Verification：覆盖所有左右黑白组合。
 
 - [ ] 实现 `PidController` 与 `RobotController`。
-  - Acceptance：Timer1 tick 驱动 10 ms 控制循环，整数 PID，状态机，失线搜索/停车，超声波避障停车。
+  - Acceptance：Timer1 tick 驱动 10 ms 控制循环，分层速度，可变 Q8 PID，状态机，失线搜索/停车，超声波确认后开环右转约 90°。
   - Verification：host 测试 PID、状态迁移、missed tick。
 
 Checkpoint：完整首版可编译；当前阶段不上传。
@@ -485,7 +493,9 @@ Checkpoint：完整首版可编译；当前阶段不上传。
 - [ ] 静态障碍物下验证 D12/D13 超声波距离趋势和 200 mm 避障阈值。
 - [ ] 点动左右电机，确认方向和最低启动 PWM。
 - [ ] 观察低速连续运行温升和电池压降。
-- [ ] 调 P，再调 D，最后决定是否需要 I。
+- [ ] 标定低速原地右转 90° 所需 control ticks，更新 `kObstacleRightTurnControlTicks`。
+- [ ] 根据直线偏航实测决定是否启用左右电机 trim。
+- [ ] 调直线 P/D，再调弯道 P/D，最后决定是否需要 I。
 - [ ] 记录最终配置到文档。
 
 ## 13. 验证策略
@@ -494,17 +504,16 @@ Checkpoint：完整首版可编译；当前阶段不上传。
 
 | 命令 | 结果 |
 |---|---|
-| `arduino-cli version` | `arduino-cli Version: 1.5.0 Commit: Homebrew Date: 2026-05-19T10:00:29Z` |
-| `arduino-cli core list` | `No platforms installed.` |
+| `arduino-cli version` | 当前环境没有 `arduino-cli`，本轮不尝试编译 |
 
-准备：
+后续工具链可用时准备：
 
 ```sh
 arduino-cli core update-index
 arduino-cli core install arduino:avr
 ```
 
-编译：
+后续工具链可用时编译：
 
 ```sh
 arduino-cli compile --fqbn arduino:avr:uno --warnings all .
@@ -515,6 +524,7 @@ arduino-cli compile --fqbn arduino:avr:uno --warnings all .
 - 生产代码不得出现 `digitalRead(`、`digitalWrite(`、`analogRead(`、`analogWrite(`。
 - 生产代码不得出现 `pulseIn(`、`delay(`、`delayMicroseconds(`。
 - 生产代码不得写 Timer0/Timer2 寄存器。
+- Timer1 寄存器写入应保持集中在 `Timer1MotorPwm.cpp`。
 - ISR 中不得出现 `Serial`、ADC、PID、动态分配、除法或长循环。
 - `Pins.h` 是唯一接线事实源，生产代码不直接写裸引脚号。
 常见但本项目仍需避免的捷径：
@@ -527,6 +537,7 @@ arduino-cli compile --fqbn arduino:avr:uno --warnings all .
 - 先传感器，后电机。
 - 超声波先静态验证 20 cm、50 cm、100 cm 三点读数趋势，再接入电机电源。
 - 先单轮点动，后双轮低速。
+- 低速原地右转 90° 必须轮子离地先确认方向，再落地短时标定。
 - 先低 `maxPwm`，记录温升后再提高。
 - 上传/调试和电机供电的组合必须按板卡说明；没有说明则电机电源关闭。
 
@@ -539,6 +550,7 @@ Always：
 - 四路电机 PWM 都由 Timer1 软件 PWM 输出。
 - 控制 tick 来自 Timer1，不依赖 `micros()`。
 - 超声波 Echo 捕获只用 PCINT 和 Timer1 时间戳，不新增 timer。
+- 避障 90° 是开环标定动作，不得写成“无需硬件校准的精确角度”。
 - 硬件未知项配置化。
 
 Ask first：
@@ -568,3 +580,4 @@ Never：
 5. 教学板 USB 与电池同时连接的电源路径是否有说明？
 6. 4 kHz 软件 PWM 的电机噪声和低速扭矩是否可接受？如不可接受，再评估 8 kHz 与 ISR 预算。
 7. 实物超声波模块丝印和资料是否确认为 HC-SR04 兼容？D13 板载 LED 负载是否影响 TRIG 边沿？
+8. `kObstacleRightTurnPwm` 与 `kObstacleRightTurnControlTicks` 在当前电池电压、地面摩擦和轮胎状态下是否接近 90°？

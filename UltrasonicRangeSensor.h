@@ -9,6 +9,7 @@ class UltrasonicRangeSensor {
  public:
   void begin();
   void poll();
+  void restartAfterManeuver();
 
   bool obstaclePresent() const {
     return obstaclePresent_;

@@ -9,8 +9,8 @@ void MotorDriver::begin() {
 }
 
 void MotorDriver::setTargetSpeeds(const int16_t left, const int16_t right) {
-  left_.target = clampSignedPwm(left);
-  right_.target = clampSignedPwm(right);
+  left_.target = applyCompensation(left, RobotConfig::kLeftMotorTrimPermille);
+  right_.target = applyCompensation(right, RobotConfig::kRightMotorTrimPermille);
 }
 
 void MotorDriver::update() {
@@ -33,6 +33,36 @@ int16_t MotorDriver::clampSignedPwm(const int16_t value) {
     return -static_cast<int16_t>(RobotConfig::kMotorMaxPwm);
   }
   return value;
+}
+
+int16_t MotorDriver::applyCompensation(const int16_t value, const int16_t trimPermille) {
+  if (value == 0) {
+    return 0;
+  }
+
+  const int32_t scale = 1000L + trimPermille;
+  int32_t scaled = static_cast<int32_t>(value) * scale;
+  if (scaled >= 0) {
+    scaled += 500;
+  } else {
+    scaled -= 500;
+  }
+
+  const int32_t divided = scaled / 1000L;
+  int16_t compensated = 0;
+  if (divided > RobotConfig::kMotorMaxPwm) {
+    compensated = RobotConfig::kMotorMaxPwm;
+  } else if (divided < -static_cast<int32_t>(RobotConfig::kMotorMaxPwm)) {
+    compensated = -static_cast<int16_t>(RobotConfig::kMotorMaxPwm);
+  } else {
+    compensated = static_cast<int16_t>(divided);
+  }
+  const int16_t minimum = RobotConfig::kMotorMinimumEffectivePwm;
+  if (minimum > 0 && compensated != 0 && magnitude(compensated) < minimum) {
+    compensated = signOf(compensated) * minimum;
+  }
+
+  return clampSignedPwm(compensated);
 }
 
 int16_t MotorDriver::rampToward(const int16_t current, const int16_t target) {
