@@ -23,7 +23,7 @@
 - 工具链可用时应能用 `arduino-cli compile --fqbn arduino:avr:uno --warnings all .` 编译；当前环境没有 `arduino-cli`，本轮验收只做静态审计。
 - 旧接线头文件已删除；`Pins.h` 直接承接原引脚功能映射，且其它模块不散落裸引脚号。
 - Timer1 CTC 初始化明确、集中、可审计；Timer0/Timer2 寄存器不被项目代码写入。
-- 电机输出有方向抽象、软启动/斜率限制、可选最低有效 PWM、左右补偿、失线停车、方向切换低电平保护。
+- 电机输出有方向抽象、教师兼容高侧刹车/反相 PWM 驱动模式、软启动/斜率限制、可选最低有效 PWM、左右补偿、失线停车、方向切换低电平保护。
 - 传感器黑线电平、EN 有效电平、中心模式、ADC 阈值、电机极性、分层速度、PID profile、开环右转避障参数全部配置化。
 - 静态搜索能证明生产代码没有 Arduino 高层 I/O API、动态分配、`String` 和控制路径阻塞。
 
@@ -250,23 +250,22 @@ value = (ADCH << 8) | ADCL
 固件保守策略：
 
 - 不把 1.2 A 当作本 PCB 的持续运行保证；散热和电机堵转电流必须硬件阶段确认。
-- 默认直线、弯道、保守和寻线速度分层，`maxPwm` 保守，`rampStepPerControlTick` 小。
+- 默认直线、弯道、保守和寻线速度分层，`maxPwm` 仍低于满量程，`rampStepPerControlTick` 保守但避免过长时间停在极低占空比。
 - 左右电机 trim 和最低有效 PWM 默认关闭，只在实测两侧速度差或启动死区后启用。
 - `speed = 0` 时两个输入都低，滑行停转。
-- 不使用两输入同时高的刹车模式作为常规控制。
-- 每侧任一时刻最多一个输入参与 PWM。
+- 默认 `kBrakeHighSideInversePwm` 模式接近教师参考代码：方向输入整周期 HIGH，另一输入输出 `255-duty` 反相 PWM；反相输入为 LOW 的时间就是有效驱动占空比，反相输入为 HIGH 时进入 L9110S 双高刹车态。
+- 保留 `kCoastLowSidePwm` 作为回退配置：只给方向输入输出 PWM，另一输入保持 LOW。
 - 方向切换先低电平空档，再启用新方向。
 
-推荐输入策略：
+默认输入策略：
 
-| 目标 | IA | IB |
+| 目标 | 方向输入 | 另一输入 |
 |---|---|---|
 | 停止/滑行 | LOW | LOW |
-| 方向 A | PWM | LOW |
-| 方向 B | LOW | PWM |
-| 刹车 | HIGH | HIGH，首版禁用 |
+| 方向 A/B 有效驱动段 | HIGH | LOW |
+| 方向 A/B 刹车段 | HIGH | HIGH |
 
-默认前进输入先按 IB：左 D3、右 D9。硬件点动后通过 `invertLeftMotor`、`invertRightMotor` 或 `forwardInput` 配置修正。
+默认前进输入按教师参考代码的隐含规则：左轮前进使用 IB/D3，右轮前进使用 IA/D10。硬件点动后通过 `invertLeftMotor`、`invertRightMotor`、`forwardInput` 或 `kMotorDriveMode` 配置修正。
 
 ## 9. 控制算法与状态机
 
@@ -468,7 +467,7 @@ Checkpoint：底层硬件路径可编译，电机默认安全低电平。
 ### Phase 3: 电机与传感器抽象
 
 - [ ] 实现 `MotorDriver`。
-  - Acceptance：有符号速度、限幅、左右 trim、最低有效 PWM、ramp、方向反转、方向切换 dead-time、失控停车。
+  - Acceptance：有符号速度、可配置驱动模式、限幅、左右 trim、最低有效 PWM、ramp、方向反转、方向切换 dead-time、失控停车。
   - Verification：host 测试 clamp/ramp/dead-time/submit mask。
 
 - [ ] 实现 `LineSensors`。

@@ -5,7 +5,7 @@
 ## 当前状态
 
 - 目标板：Arduino UNO 兼容板，ATmega328P，16 MHz，ArduinoCore-avr standard variant。
-- 电机驱动：按 L9110S-MS 双输入模型设计，固件默认保守限幅、斜率限制和可配置左右补偿。
+- 电机驱动：按 L9110S-MS 双输入模型设计，默认采用教师参考代码暗示的高侧刹车/反相 PWM 模式，保留斜率限制和可配置左右补偿。
 - 传感器：左右双循迹传感器，默认数字模式，A1/A0 读 OUT，D2/A5 控 EN。
 - 避障：按 `Car_head.h` 接入 HC-SR04/HR-SR04 类超声波模块，D12 读 ECHO，D13 输出 TRIG；确认障碍后停车并开环右转约 90°。
 - PWM 与控制 tick：Timer1 CTC 软件 PWM，默认 4 kHz；每 40 个 PWM 周期产生 10 ms 控制 tick。
@@ -38,7 +38,7 @@ arduino-cli compile --fqbn arduino:avr:uno --warnings all .
 | `FastIo.h` | 固定端口位的传感器 EN/OUT 操作。 |
 | `AdcDriver.*` | ADC0/ADC1 直接寄存器读取，模拟模式使用。 |
 | `Timer1MotorPwm.*` | Timer1 CTC 初始化、四路软件 PWM、10 ms control tick。 |
-| `MotorDriver.*` | L9110S-MS 有符号速度、方向反转、限幅、斜率限制和方向空档。 |
+| `MotorDriver.*` | L9110S-MS 有符号速度、驱动模式、方向反转、限幅、斜率限制和方向空档。 |
 | `LineSensors.*` | 数字/ADC 传感器采样、极性配置、3 样本多数表决。 |
 | `LineEstimator.*` | 双传感器黑白状态到离散误差和失线标记的转换。 |
 | `PidController.*` | 整数 Q8 定点 PID，支持按路况切换增益和输出限幅。 |
@@ -74,7 +74,7 @@ A6/A7 只作为 ADC-only 硬件事实保留，首版不使用，不能当普通�
 
 Timer1 同时承担电机软件 PWM 和 control tick。`Timer1MotorPwm` 在主循环中把 0-255 duty 转换为周期起始高电平 mask 和最多四个 falling edge event；ISR 只做端口置位/清位、edge 调度和 tick 计数。
 
-电机层只暴露左右有符号速度。`MotorDriver` 负责限幅、ramp、方向反转、同侧单输入 PWM、方向切换低电平空档、左右 trim 和可选最低有效 PWM，避免 L9110S 两输入瞬间冲突。
+电机层只暴露左右有符号速度。`MotorDriver` 负责限幅、ramp、驱动模式、方向反转、方向切换低电平空档、左右 trim 和可选最低有效 PWM。默认驱动模式为方向输入整周期 HIGH、另一输入 `255-duty` 反相 PWM；`speed = 0` 和换向空档仍保持 IA/IB 全 LOW。
 
 传感器默认数字模式，跨控制 tick 做 3 样本多数表决；模拟模式保留 ADC0/ADC1 直接寄存器读取、阈值和滞回，但不调用 `analogRead()`。
 
@@ -82,7 +82,7 @@ Timer1 同时承担电机软件 PWM 和 control tick。`Timer1MotorPwm` 在主�
 
 优先改 `RobotConfig.h` 中的配置，不要把参数写进控制逻辑：
 
-- 电机：`kMotorStraightPwm`、`kMotorCurvePwm`、`kMotorCautiousPwm`、`kMotorSearchPwm`、`kMotorMaxPwm`、`kMotorRampStepPerControlTick`、`kLeftMotorTrimPermille`、`kRightMotorTrimPermille`。
+- 电机：`kMotorDriveMode`、`kMotorStraightPwm`、`kMotorCurvePwm`、`kMotorCautiousPwm`、`kMotorSearchPwm`、`kMotorMaxPwm`、`kMotorRampStepPerControlTick`、`kLeftMotorTrimPermille`、`kRightMotorTrimPermille`。
 - 方向：`kInvertLeftMotor`、`kInvertRightMotor`、`kLeftForwardUsesIb`、`kRightForwardUsesIb`。
 - 传感器：`kSensorMode`、`kSensorEnableActiveLevel`、`kSensorBlackLevel`、`kCenterMode`。
 - ADC：`kAdcBlackThreshold`、`kAdcHysteresis`。
@@ -107,7 +107,7 @@ Timer1 同时承担电机软件 PWM 和 control tick。`Timer1MotorPwm` 在主�
 1. 只接传感器，确认 EN 有效电平、黑线电平和 A0/A1 左右对应关系。
 2. 只接超声波模块，确认 D13 TRIG、D12 ECHO、5 V/GND 和共地，先用静止障碍物核对 20-400 cm 量程内读数趋势。
 3. 轮子离地，低 PWM 点动左电机和右电机，确认方向。
-4. 根据实测结果调整 `kInvertLeftMotor`、`kInvertRightMotor`、`kLeftForwardUsesIb`、`kRightForwardUsesIb`。
+4. 默认左轮前进使用 IB、右轮前进使用 IA；根据实测结果调整 `kInvertLeftMotor`、`kInvertRightMotor`、`kLeftForwardUsesIb`、`kRightForwardUsesIb` 和必要时的 `kMotorDriveMode`。
 5. 测最低启动 PWM、低速连续运行温升和电池压降，再决定是否提高 `kMotorMaxPwm` 或启用 `kMotorMinimumEffectivePwm`。
 6. 标定低速原地右转 90° 所需时间，再调整 `kObstacleRightTurnControlTicks`。
 7. 先调 P，再调 D，最后决定是否需要 I；每次调整都记录硬件条件。
@@ -120,6 +120,7 @@ Timer1 同时承担电机软件 PWM 和 control tick。`Timer1MotorPwm` 在主�
 - [ADR-003: 使用 Timer1 作为电机 PWM 与控制 tick 专用时基](docs/decisions/ADR-003-timer1-motor-timebase.md)
 - [ADR-004: 使用 PCINT 和 Timer1 时间戳实现超声波避障](docs/decisions/ADR-004-ultrasonic-obstacle-avoidance.md)
 - [ADR-005: 分层循迹控制与开环 90° 右转避障](docs/decisions/ADR-005-layered-control-and-right-turn-obstacle.md)
+- [ADR-006: 教师兼容的 L9110S 电机驱动模型](docs/decisions/ADR-006-teacher-compatible-motor-drive-model.md)
 
 ## 许可证
 

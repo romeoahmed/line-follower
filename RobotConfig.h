@@ -19,6 +19,11 @@ enum class CenterMode : uint8_t {
   kOnLine = 1,
 };
 
+enum class MotorDriveMode : uint8_t {
+  kCoastLowSidePwm = 0,
+  kBrakeHighSideInversePwm = 1,
+};
+
 namespace RobotConfig {
 
 // Timer1: 16 MHz / 8 = 2 MHz，TOP=499 得到 4 kHz 软件 PWM。
@@ -37,12 +42,12 @@ static_assert(kTimer1TicksPerMicrosecond == 2, "Timer1 时间戳必须保持 0.5
 
 // L9110S-MS 供应链参数为 2.5-12 V、1.2 A continuous、2.0 A peak；固件默认保守限幅。
 constexpr uint8_t kPwmFullScale = 255;
-constexpr uint8_t kMotorStraightPwm = 76;
-constexpr uint8_t kMotorCurvePwm = 58;
-constexpr uint8_t kMotorCautiousPwm = 48;
-constexpr uint8_t kMotorSearchPwm = 46;
-constexpr uint8_t kMotorMaxPwm = 120;
-constexpr uint8_t kMotorRampStepPerControlTick = 5;
+constexpr uint8_t kMotorStraightPwm = 92;
+constexpr uint8_t kMotorCurvePwm = 78;
+constexpr uint8_t kMotorCautiousPwm = 68;
+constexpr uint8_t kMotorSearchPwm = 68;
+constexpr uint8_t kMotorMaxPwm = 150;
+constexpr uint8_t kMotorRampStepPerControlTick = 8;
 constexpr uint8_t kDirectionBlankControlTicks = 1;
 constexpr uint8_t kMotorMinimumEffectivePwm = 0;
 constexpr int16_t kLeftMotorTrimPermille = 0;
@@ -61,7 +66,8 @@ static_assert(kRightMotorTrimPermille >= -500 && kRightMotorTrimPermille <= 500,
 constexpr bool kInvertLeftMotor = false;
 constexpr bool kInvertRightMotor = false;
 constexpr bool kLeftForwardUsesIb = true;
-constexpr bool kRightForwardUsesIb = true;
+constexpr bool kRightForwardUsesIb = false;
+constexpr MotorDriveMode kMotorDriveMode = MotorDriveMode::kBrakeHighSideInversePwm;
 
 constexpr SensorMode kSensorMode = SensorMode::kDigital;
 constexpr ActiveLevel kSensorEnableActiveLevel = ActiveLevel::kHigh;
@@ -81,7 +87,7 @@ constexpr uint16_t kObstacleStopDistanceMm = 200;
 constexpr uint8_t kObstacleConfirmSamples = 2;
 constexpr uint8_t kObstacleClearSamples = 2;
 constexpr uint8_t kObstacleStopHoldControlTicks = 8;
-constexpr uint8_t kObstacleRightTurnPwm = 55;
+constexpr uint8_t kObstacleRightTurnPwm = 72;
 constexpr uint16_t kObstacleRightTurnControlTicks = 55;
 
 constexpr uint8_t kUltrasonicTriggerPulseUs = 10;

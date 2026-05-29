@@ -6,7 +6,7 @@
 namespace lf {
 namespace Timer1MotorPwm {
 
-// 0 表示整周期低电平，255 表示整周期高电平；电机层保证同侧不双高。
+// 0 表示整周期低电平，255 表示整周期高电平；同侧 IA/IB 组合策略由 MotorDriver 决定。
 struct DutyFrame {
   uint8_t leftIb;
   uint8_t leftIa;

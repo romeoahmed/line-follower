@@ -149,13 +149,27 @@ void MotorDriver::applySide(const int16_t signedPwm, const bool invert, const bo
     return;
   }
 
+  const uint8_t duty = magnitude(command);
   const bool useForwardInput = command > 0;
-  const bool useIb = (useForwardInput == forwardUsesIb);
-  // 同一侧任意时刻只驱动 IA 或 IB 一路；另一端保持低电平滑行。
-  if (useIb) {
-    *ibDuty = magnitude(command);
+  const bool directionInputUsesIb = (useForwardInput == forwardUsesIb);
+
+  if (RobotConfig::kMotorDriveMode == MotorDriveMode::kBrakeHighSideInversePwm) {
+    const uint8_t inverseDuty = static_cast<uint8_t>(RobotConfig::kPwmFullScale - duty);
+    if (directionInputUsesIb) {
+      *ibDuty = RobotConfig::kPwmFullScale;
+      *iaDuty = inverseDuty;
+    } else {
+      *iaDuty = RobotConfig::kPwmFullScale;
+      *ibDuty = inverseDuty;
+    }
+    return;
+  }
+
+  // 低侧滑行 PWM 回退模式：同一侧任意时刻只驱动 IA 或 IB 一路。
+  if (directionInputUsesIb) {
+    *ibDuty = duty;
   } else {
-    *iaDuty = magnitude(command);
+    *iaDuty = duty;
   }
 }
 

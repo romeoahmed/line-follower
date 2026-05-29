@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted; refined by ADR-002, ADR-003, ADR-004, and ADR-005
+Accepted; refined by ADR-002, ADR-003, ADR-004, ADR-005, and ADR-006
 
 ## Date
 
@@ -156,6 +156,7 @@ Arduino API 的边界：
 - ADR-003：`docs/decisions/ADR-003-timer1-motor-timebase.md`
 - ADR-004：`docs/decisions/ADR-004-ultrasonic-obstacle-avoidance.md`
 - ADR-005：`docs/decisions/ADR-005-layered-control-and-right-turn-obstacle.md`
+- ADR-006：`docs/decisions/ADR-006-teacher-compatible-motor-drive-model.md`
 - Arduino UNO Rev3：https://docs.arduino.cc/hardware/uno-rev3/
 - ArduinoCore-avr standard pins：https://github.com/arduino/ArduinoCore-avr/blob/master/variants/standard/pins_arduino.h
 - ArduinoCore-avr wiring_analog：https://github.com/arduino/ArduinoCore-avr/blob/master/cores/arduino/wiring_analog.c
