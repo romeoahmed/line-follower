@@ -36,14 +36,18 @@
 | ArduinoCore-avr `wiring_analog.c`：https://github.com/arduino/ArduinoCore-avr/blob/master/cores/arduino/wiring_analog.c | `analogRead()`、`analogWrite()` 的 AVR 实现；确认为何生产代码不用高层 API | Arduino 官方源码 |
 | ArduinoCore-avr standard pins：https://github.com/arduino/ArduinoCore-avr/blob/master/variants/standard/pins_arduino.h | A0-A7 常量、D0-D13、PWM pin、Timer channel 映射 | Arduino 官方源码 |
 | Arduino Port Manipulation：https://docs.arduino.cc/hacking/software/PortManipulation/ | 直接端口访问的速度收益、可移植性代价、DDR/PORT/PIN 模型 | Arduino 官方 |
+| Arduino `pulseIn()`：https://docs.arduino.cc/language-reference/en/functions/advanced-io/pulseIn/ | 确认 `pulseIn()` 会等待脉冲，避障控制路径不使用它 | Arduino 官方 |
+| Arduino `attachInterrupt()`：https://docs.arduino.cc/language-reference/en/functions/external-interrupts/attachInterrupt/ | UNO 外部中断脚限制；D12 ECHO 不能用 `attachInterrupt()` | Arduino 官方 |
 | Arduino `micros()` / `millis()`：https://docs.arduino.cc/language-reference/en/functions/time/micros/ 、https://docs.arduino.cc/language-reference/en/functions/time/millis/ | 说明 Timer0 时间函数保留为非控制调试用途 | Arduino 官方 |
 | Arduino CLI compile/core install/sketch spec：https://docs.arduino.cc/arduino-cli/commands/arduino-cli_compile/ 、https://docs.arduino.cc/arduino-cli/commands/arduino-cli_core_install/ 、https://docs.arduino.cc/arduino-cli/sketch-specification/ | 编译命令、core 安装、sketch 命名 | Arduino 官方 |
 | Microchip ATmega328P：https://www.microchip.com/en-us/product/ATMEGA328P | MCU 官方入口与数据手册入口 | 芯片厂商官方 |
 | ATmega328P 数据手册：https://ww1.microchip.com/downloads/en/DeviceDoc/Atmel-7810-Automotive-Microcontrollers-ATmega328P_Datasheet.pdf | Timer1 CTC/Fast PWM、COM/OCR、ADC、PORT、I/O 电气限制 | 芯片厂商官方 |
+| SparkFun HC-SR04 datasheet：https://cdn.sparkfun.com/datasheets/Sensors/Proximity/HCSR04.pdf | HC-SR04 5 V 供电、10 us TRIG、Echo 宽度、2-400 cm 量程、约 38 ms 超时、测量周期建议 | 供应商一手资料；高于泛博客，低于原厂芯片数据手册 |
+| ISO C++ Core Guidelines：https://isocpp.github.io/CppCoreGuidelines/CppCoreGuidelines | C++ 接口、类型、安全转换和资源管理最佳实践参考 | ISO C++ 社区官方指南 |
 | LCSC MSKSEMI L9110S-MS：https://www.lcsc.com/product-detail/Motor-Driver-ICs_MSKSEMI-L9110S-MS_C19272815.html | L9110S-MS 料号、封装、2.5-12 V、1.2 A continuous、2.0 A peak 等分销页面参数 | 授权分销/供应商资料；低于厂商官网 |
 | JLCPCB L9110S-MS：https://jlcpcb.com/partdetail/MSKSEMI-L9110SMS/C19272815 | 同一 LCSC 料号的装配供应链参数 | 授权制造/供应链资料；低于厂商官网 |
 
-说明：没有找到可直接核验的 MSKSEMI 官网原始 PDF。文档只能把 LCSC/JLCPCB 参数视作“供应链可核验参数”，不能把它们当作本教学板 PCB 的连续散热能力。电机型号、电池规格、板卡电源路径仍必须硬件阶段确认。
+说明：没有找到可直接核验的 MSKSEMI 官网原始 PDF。文档只能把 LCSC/JLCPCB 参数视作“供应链可核验参数”，不能把它们当作本教学板 PCB 的连续散热能力。用户写的是 HR-SR04；当前可核验资料主要是 HC-SR04/SR04 模块族资料，本设计按同类 5 V 超声波测距模块处理，实际模块丝印和电气参数仍必须硬件阶段确认。电机型号、电池规格、板卡电源路径仍必须硬件阶段确认。
 
 ## 3. 已确认参数与未知项
 
@@ -58,6 +62,7 @@
 | Timer2 | ArduinoCore-avr 初始化为 PWM 可用 timer | 项目不用 Timer2，D3 不使用 OC2B |
 | 引脚常量 | standard variant 定义 A6/A7 常量，但 `NUM_ANALOG_INPUTS` 为 6，A6/A7 不是普通数字 I/O | A6/A7 只作为 ADC6/ADC7 事实保留，首版不用 |
 | L9110S-MS | LCSC 页面标注 SOP-8、2.5-12 V、1.2 A continuous、2.0 A peak | 默认低速、限幅、斜率限制；不把峰值当连续能力 |
+| HC-SR04/SR04 超声波 | SparkFun datasheet 标注 5 V、约 15 mA、2-400 cm、约 15 度测量角、10 us TRIG、Echo 输出与距离成比例 | 默认 60 ms 周期、38 ms Echo 超时、200 mm 避障阈值、连续样本确认 |
 
 ### 3.2 未确认
 
@@ -69,6 +74,7 @@
 | 电池盒节数和化学类型 | 过压/欠压/供电能力不足 | 固件不假设；接线前实测 |
 | 教学板 USB 与电池电源路径 | 反灌或电机干扰上传 | 没有说明时，上传/调试关闭电机电源 |
 | L9110S-MS 在该 PCB 上的连续散热能力 | 芯片过热 | 默认 `maxPwm` 保守，记录温升后再提高 |
+| 实物超声波模块是否真为 HC-SR04 兼容 | 命名 HR-SR04 可能是供应商丝印或变体 | 先按 D12/D13 低速静态测距验证，再让车轮离地联调 |
 
 ## 4. 引脚、端口与 Timer 审计
 
@@ -84,10 +90,12 @@
 | 右循迹 EN | `kRightSensorEnablePin` | A5 | PC5 | 数字 I/O/ADC5 | 直接写 PORTC5 |
 | 左循迹 OUT | `kLeftSensorOutPin` | A1 | PC1/ADC1 | 数字 I/O/ADC1 | 数字读 PINC1 或直接 ADC1 |
 | 右循迹 OUT | `kRightSensorOutPin` | A0 | PC0/ADC0 | 数字 I/O/ADC0 | 数字读 PINC0 或直接 ADC0 |
+| 超声波 ECHO | `kUltrasonicEchoPin` | D12 | PB4/PCINT4 | 数字 I/O / pin-change interrupt | PCINT0 ISR 捕获回波边沿 |
+| 超声波 TRIG | `kUltrasonicTriggerPin` | D13 | PB5/SCK/LED_BUILTIN | 数字 I/O | 直接写 PORTB5，和蓝牙 RX 复用 |
 | BADGE | 已排除 | A7 | ADC7 only | ADC-only | 首版不用 |
 | 震动 | 已排除 | A6 | ADC6 only | ADC-only | 首版不用 |
 | LED2/蓝牙 tx | 已排除 | D11 | PB3/OC2A | 共享 | 首版不用 |
-| 超声波 TRIG/蓝牙 rx | 已排除 | D13 | PB5 | 共享 | 首版不用 |
+| 蓝牙 rx | 已排除 | D13 | PB5 | 与超声波 TRIG 共享 | 加入超声波后不同时使用蓝牙 |
 
 结论：
 
@@ -204,7 +212,33 @@ value = (ADCH << 8) | ADCL
 - ADC 不在 Timer1 ISR 中执行，避免打断 PWM edge 时序。
 - ADC 阈值、滞回、黑白校准值来自硬件实测。
 
-## 7. L9110S-MS 电机驱动策略
+## 7. 超声波避障输入
+
+按 `Car_head.h` 保留的接线加入 HC-SR04/HR-SR04 类超声波模块：
+
+| 模块侧 | 板侧 |
+|---|---|
+| ECHO | D12 / PB4 / PCINT4 |
+| TRIG | D13 / PB5 |
+| VCC | 按模块资料，HC-SR04 资料为 5 V |
+| GND | Arduino GND，必须与电机电源负极共地 |
+
+参数按可核验 HC-SR04 资料保守配置：
+
+- TRIG 高电平至少 10 us。
+- Echo 脉宽与距离成比例，常用换算为 `distance_cm = echo_us / 58`。
+- 标称测距范围 2-400 cm；近于 2 cm 的读数只作为“极近障碍”保守处理，不作为精确距离。
+- Echo 超时按 38 ms 处理；测量周期默认 60 ms，避免连续触发回波串扰。
+
+实现约束：
+
+- 不使用 `pulseIn()`，避免主循环最长阻塞到 Echo timeout。
+- D12 不是 UNO `attachInterrupt()` 支持的外部中断脚，因此直接使用 ATmega328P PCINT0/PB4 捕获 Echo 上升沿和下降沿。
+- 时间戳来自 `Timer1MotorPwm::captureTimeTicks()`，分辨率 0.5 us；不新增 Timer0/Timer2 用途。
+- PCINT ISR 只读 PINB、捕获 Timer1 时间戳和设置 pending flag；距离换算、确认计数和状态机都在主循环完成。
+- 默认连续 2 次测得距离小于等于 200 mm 才进入 `ObstacleStop`；连续 2 次清空后回到 `SensorSettle`，再恢复循迹。
+
+## 8. L9110S-MS 电机驱动策略
 
 供应链可核验参数：
 
@@ -232,24 +266,26 @@ value = (ADCH << 8) | ADCL
 
 默认前进输入先按 IB：左 D3、右 D9。硬件点动后通过 `invertLeftMotor`、`invertRightMotor` 或 `forwardInput` 配置修正。
 
-## 8. 控制算法与状态机
+## 9. 控制算法与状态机
 
-### 8.1 控制 tick
+### 9.1 控制 tick
 
 Timer1 每 40 个 PWM 周期置位一次 `controlTickDue`。主循环看到 flag 后：
 
-1. 清 flag。
-2. 读取传感器。
-3. 更新线位估计。
-4. 更新状态机。
-5. 计算 PID。
-6. 混控左右目标速度。
-7. 应用 trim、限幅、ramp、方向空档。
-8. 提交下一周期 PWM 影子缓冲。
+1. 非阻塞轮询超声波 TRIG/ECHO 状态机。
+2. 清 flag。
+3. 若避障 latch 生效，立即进入 `ObstacleStop`。
+4. 读取循迹传感器。
+5. 更新线位估计。
+6. 更新状态机。
+7. 计算 PID。
+8. 混控左右目标速度。
+9. 应用 trim、限幅、ramp、方向空档。
+10. 提交下一周期 PWM 影子缓冲。
 
 主循环不得补跑历史 tick；如果错过 tick，只记录 missed counter，下一轮使用最新状态。
 
-### 8.2 线位估计
+### 9.2 线位估计
 
 | CenterMode | 左 | 右 | 解释 | 误差 |
 |---|---|---|---|---:|
@@ -264,7 +300,7 @@ Timer1 每 40 个 PWM 周期置位一次 `controlTickDue`。主循环看到 flag
 
 双数字传感器无法凭单帧读数解决所有歧义；失线策略必须结合历史误差、持续时间和速度限制。
 
-### 8.3 PID
+### 9.3 PID
 
 整数 Q8 位置式 PID：
 
@@ -282,7 +318,7 @@ correction = clamp(raw / 256, -maxCorrection, +maxCorrection)
 - 输出饱和时冻结或回退积分。
 - 失线、停车、模式切换时 reset/freeze 积分。
 
-### 8.4 状态机
+### 9.4 状态机
 
 | 状态 | 行为 |
 |---|---|
@@ -291,11 +327,12 @@ correction = clamp(raw / 256, -maxCorrection, +maxCorrection)
 | `SensorSettle` | EN 生效后等待传感器稳定 |
 | `FollowLine` | PID 差速循迹 |
 | `LineLost` | 冻结积分，按最后误差低速搜索；超时停车 |
+| `ObstacleStop` | 超声波连续确认近距离障碍后立即拉低电机；障碍清空后重新进入传感器稳定阶段 |
 | `Stopped` | 四路电机输入低，等待复位或未来启动输入 |
 
 当前首版接线表没有按键引脚，首版不设计按键启动。
 
-## 9. 代码结构
+## 10. 代码结构
 
 ```text
 .
@@ -310,13 +347,15 @@ correction = clamp(raw / 256, -maxCorrection, +maxCorrection)
 ├── LineSensors.h/.cpp          # EN/OUT、数字/ADC、极性、滤波
 ├── LineEstimator.h/.cpp
 ├── PidController.h/.cpp
+├── UltrasonicRangeSensor.h/.cpp # PCINT Echo 捕获、Timer1 时间戳、避障 latch
 ├── RobotController.h/.cpp
 └── docs/
     ├── line-follower-plan-and-spec.md
     └── decisions/
         ├── ADR-001-line-follower-architecture.md
         ├── ADR-002-direct-register-adc-pwm.md
-        └── ADR-003-timer1-motor-timebase.md
+        ├── ADR-003-timer1-motor-timebase.md
+        └── ADR-004-ultrasonic-obstacle-avoidance.md
 ```
 
 模块边界：
@@ -324,12 +363,13 @@ correction = clamp(raw / 256, -maxCorrection, +maxCorrection)
 - 只有 `Timer1MotorPwm` 写 Timer1 寄存器和电机输出 PORT 位。
 - 只有 `AdcDriver` 写 ADC 寄存器。
 - 只有 `FastIo` 写传感器 EN 和读取 PINC。
+- 只有 `UltrasonicRangeSensor` 写超声波 TRIG/ECHO DDR/PORT 和 PCINT 寄存器。
 - 控制层不直接碰硬件寄存器。
-- 所有共享 ISR 数据都由 `Timer1MotorPwm` 提供明确的 `submit()` / `emergencyStop()` 接口。
+- 所有 Timer1 共享 ISR 数据都由 `Timer1MotorPwm` 提供明确的 `submit()` / `emergencyStop()` / `captureTimeTicks()` 接口。
 
-## 10. 接线规范
+## 11. 接线规范
 
-### 10.1 总原则
+### 11.1 总原则
 
 1. 断电接线，USB 和电池都先断开。
 2. 电机供电不从 Arduino 5 V 或电脑 USB 取电。
@@ -338,7 +378,7 @@ correction = clamp(raw / 256, -maxCorrection, +maxCorrection)
 5. 第一次电机测试轮子离地，PWM 从低值点动。
 6. 上传/串口调试时，如无板卡电源路径说明，关闭电机电源。
 
-### 10.2 集成教学板检查
+### 11.2 集成教学板检查
 
 | 项 | 要求 |
 |---|---|
@@ -346,10 +386,11 @@ correction = clamp(raw / 256, -maxCorrection, +maxCorrection)
 | 右电机 | 接板上右电机输出端，不接 D9/D10 信号脚 |
 | 左循迹 | 板载或外接到 EN=D2、OUT=A1 |
 | 右循迹 | 板载或外接到 EN=A5、OUT=A0 |
+| 超声波 | 外接到 TRIG=D13、ECHO=D12；D13 与蓝牙 RX 复用，不同时接蓝牙 |
 | 电池盒 | 接板上电源输入，先确认极性和允许电压 |
 | USB-C | 编译上传和低频串口调试；电机调试时轮子离地 |
 
-### 10.3 外接 L9110S-MS 时
+### 11.3 外接 L9110S-MS 时
 
 | 驱动侧 | 板侧 |
 |---|---|
@@ -362,7 +403,7 @@ correction = clamp(raw / 256, -maxCorrection, +maxCorrection)
 | VM/VCC | 按 L9110S-MS/模块/教学板说明接电机电源 |
 | GND | 与 Arduino GND、电池负极共地 |
 
-### 10.4 外接循迹传感器时
+### 11.4 外接循迹传感器时
 
 | 传感器侧 | 板侧 |
 |---|---|
@@ -373,7 +414,22 @@ correction = clamp(raw / 256, -maxCorrection, +maxCorrection)
 | VCC | 按模块资料；不能假设都 5 V tolerant |
 | GND | Arduino GND |
 
-## 11. 实现任务
+### 11.5 外接超声波模块时
+
+| 超声波侧 | 板侧 |
+|---|---|
+| TRIG | D13 / PB5 / `kUltrasonicTriggerPin` |
+| ECHO | D12 / PB4 / PCINT4 / `kUltrasonicEchoPin` |
+| VCC | 按模块资料；HC-SR04 资料为 5 V |
+| GND | Arduino GND，与电机电源负极共地 |
+
+注意：
+
+- D13 在 `Car_head.h` 中同时也是蓝牙 `rx_pin`，启用超声波避障时不接蓝牙。
+- D13 也是 UNO 板载 LED/SCK；本项目不使用 SPI，板载 LED 负载不作为状态指示使用。
+- 第一次验证只接 USB 和超声波模块，不接电机电源，先用静止障碍物确认距离趋势。
+
+## 12. 实现任务
 
 ### Phase 1: 编译骨架
 
@@ -382,7 +438,7 @@ correction = clamp(raw / 256, -maxCorrection, +maxCorrection)
   - Verification：`arduino-cli compile --fqbn arduino:avr:uno --warnings all .`
 
 - [ ] 新增 `RobotConfig.h`。
-  - Acceptance：Timer1、PWM、PID、传感器极性、电机极性全部集中配置。
+  - Acceptance：Timer1、PWM、PID、传感器极性、电机极性、超声波测距和避障阈值全部集中配置。
   - Verification：`static_assert` 检查 `timer1PwmTop`、控制周期、PWM 范围。
 
 ### Phase 2: Timer1 与底层 I/O
@@ -394,6 +450,10 @@ correction = clamp(raw / 256, -maxCorrection, +maxCorrection)
 - [ ] 实现 `FastIo` 与 `AdcDriver`。
   - Acceptance：传感器数字模式读 `PINC`；模拟模式直接 ADC0/ADC1；EN 直接 PORT 输出。
   - Verification：不调用 `digitalRead()`、`digitalWrite()`、`analogRead()`。
+
+- [ ] 实现 `UltrasonicRangeSensor`。
+  - Acceptance：D13 非阻塞 TRIG；D12 PCINT 捕获 Echo；Timer1 时间戳换算距离；连续样本避障 latch。
+  - Verification：不使用 `pulseIn()`、`delay()`、`delayMicroseconds()`，不写 Timer0/Timer2。
 
 Checkpoint：底层硬件路径可编译，电机默认安全低电平。
 
@@ -414,7 +474,7 @@ Checkpoint：底层硬件路径可编译，电机默认安全低电平。
   - Verification：覆盖所有左右黑白组合。
 
 - [ ] 实现 `PidController` 与 `RobotController`。
-  - Acceptance：Timer1 tick 驱动 10 ms 控制循环，整数 PID，状态机，失线搜索/停车。
+  - Acceptance：Timer1 tick 驱动 10 ms 控制循环，整数 PID，状态机，失线搜索/停车，超声波避障停车。
   - Verification：host 测试 PID、状态迁移、missed tick。
 
 Checkpoint：完整首版可编译；当前阶段不上传。
@@ -422,12 +482,13 @@ Checkpoint：完整首版可编译；当前阶段不上传。
 ### Phase 5: 硬件校准
 
 - [ ] 测 A0/A1 黑白电平与 EN 极性。
+- [ ] 静态障碍物下验证 D12/D13 超声波距离趋势和 200 mm 避障阈值。
 - [ ] 点动左右电机，确认方向和最低启动 PWM。
 - [ ] 观察低速连续运行温升和电池压降。
 - [ ] 调 P，再调 D，最后决定是否需要 I。
 - [ ] 记录最终配置到文档。
 
-## 12. 验证策略
+## 13. 验证策略
 
 本机当前状态：
 
@@ -452,18 +513,24 @@ arduino-cli compile --fqbn arduino:avr:uno --warnings all .
 静态检查：
 
 - 生产代码不得出现 `digitalRead(`、`digitalWrite(`、`analogRead(`、`analogWrite(`。
+- 生产代码不得出现 `pulseIn(`、`delay(`、`delayMicroseconds(`。
 - 生产代码不得写 Timer0/Timer2 寄存器。
 - ISR 中不得出现 `Serial`、ADC、PID、动态分配、除法或长循环。
 - `Pins.h` 是唯一接线事实源，生产代码不直接写裸引脚号。
+常见但本项目仍需避免的捷径：
+
+- 不用 `attachInterrupt()` 处理 D12；UNO 外部中断脚不是 D12。
+- 不用 `micros()` 驱动避障测距；Timer0 保持给 Arduino core 和非控制调试。
 
 硬件阶段：
 
 - 先传感器，后电机。
+- 超声波先静态验证 20 cm、50 cm、100 cm 三点读数趋势，再接入电机电源。
 - 先单轮点动，后双轮低速。
 - 先低 `maxPwm`，记录温升后再提高。
 - 上传/调试和电机供电的组合必须按板卡说明；没有说明则电机电源关闭。
 
-## 13. 边界
+## 14. 边界
 
 Always：
 
@@ -471,6 +538,7 @@ Always：
 - Timer0/Timer2 不写。
 - 四路电机 PWM 都由 Timer1 软件 PWM 输出。
 - 控制 tick 来自 Timer1，不依赖 `micros()`。
+- 超声波 Echo 捕获只用 PCINT 和 Timer1 时间戳，不新增 timer。
 - 硬件未知项配置化。
 
 Ask first：
@@ -479,6 +547,7 @@ Ask first：
 - 使用 Timer0 或 Timer2。
 - 加第三方库。
 - 启用 Servo/Tone/SoftwareSerial 等会占用 timer 或实时资源的功能。
+- 同时启用蓝牙和 D13 超声波 TRIG。
 - 把上传/通电/实跑作为验收。
 
 Never：
@@ -487,9 +556,10 @@ Never：
 - 把 L9110S-MS 峰值电流当连续能力。
 - 把 A6/A7 当普通数字 I/O。
 - 在 ISR 中做串口输出、ADC 阻塞采样或 PID。
+- 用 `pulseIn()` 在控制路径等待超声波回波。
 - 为了解决编译问题绕过 `Pins.h` 中的接线事实。
 
-## 14. 开放问题
+## 15. 开放问题
 
 1. 循迹传感器型号、供电、电平、EN 极性是什么？
 2. 传感器安装几何是 `BetweenSensors` 还是 `OnLine`？
@@ -497,3 +567,4 @@ Never：
 4. 电池盒电压和放电能力是多少？
 5. 教学板 USB 与电池同时连接的电源路径是否有说明？
 6. 4 kHz 软件 PWM 的电机噪声和低速扭矩是否可接受？如不可接受，再评估 8 kHz 与 ISR 预算。
+7. 实物超声波模块丝印和资料是否确认为 HC-SR04 兼容？D13 板载 LED 负载是否影响 TRIG 边沿？

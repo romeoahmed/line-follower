@@ -9,6 +9,7 @@
 - 目标板：Arduino UNO 兼容板，ATmega328P，16 MHz，ArduinoCore-avr standard variant。
 - 电机驱动：按 L9110S-MS 双输入模型设计，固件默认保守限幅。
 - 传感器：左右双循迹传感器，默认数字模式，A1/A0 读 OUT，D2/A5 控 EN。
+- 避障：按 `Car_head.h` 接入 HC-SR04/HR-SR04 类超声波模块，D12 读 ECHO，D13 输出 TRIG。
 - PWM 与控制 tick：Timer1 CTC 软件 PWM，默认 4 kHz；每 40 个 PWM 周期产生 10 ms 控制 tick。
 - 生产控制路径：不使用 `digitalRead()`、`digitalWrite()`、`analogRead()`、`analogWrite()`、`String` 或动态分配。
 - Timer 边界：只手写 Timer1；Timer0 和 Timer2 保持 Arduino core 原状。
@@ -43,6 +44,7 @@ arduino-cli compile --fqbn arduino:avr:uno --warnings all .
 | `LineSensors.*` | 数字/ADC 传感器采样、极性配置、3 样本多数表决。 |
 | `LineEstimator.*` | 双传感器黑白状态到离散误差和失线标记的转换。 |
 | `PidController.*` | 整数 Q8 定点 PID。 |
+| `UltrasonicRangeSensor.*` | D13 TRIG、D12 ECHO，使用 PCINT0 捕获回波宽度，非阻塞避障测距。 |
 | `RobotController.*` | 主状态机、10 ms 控制循环、差速混控、失线搜索和停车。 |
 | `docs/line-follower-plan-and-spec.md` | 详细技术规范、接线规范、验证策略和开放问题。 |
 | `docs/decisions/` | 架构和定时器/寄存器决策记录。 |
@@ -61,12 +63,16 @@ arduino-cli compile --fqbn arduino:avr:uno --warnings all .
 | 右循迹 EN | A5 | PC5 | 直接写 PORTC5 |
 | 左循迹 OUT | A1 | PC1/ADC1 | 数字读 PINC1 或 ADC1 |
 | 右循迹 OUT | A0 | PC0/ADC0 | 数字读 PINC0 或 ADC0 |
+| 超声波 ECHO | D12 | PB4/PCINT4 | Pin-change interrupt 捕获回波 |
+| 超声波 TRIG | D13 | PB5 | 直接写 PORTB5，和蓝牙 RX 复用，不同时使用 |
 
 A6/A7 只作为 ADC-only 硬件事实保留，首版不使用，不能当普通数字 I/O。
 
 ## 架构要点
 
 控制循环由 Timer1 产生的 10 ms tick 驱动。`loop()` 只调用 `RobotController::poll()`，不会用 `micros()` 补跑历史 tick。若主循环错过多个 tick，只记录 missed counter，并使用最新状态继续控制，避免延迟累积。
+
+超声波测距不使用 `pulseIn()`，避免在控制路径等待最长回波超时。D12 的 ECHO 由 ATmega328P pin-change interrupt 捕获上升沿和下降沿，时间戳来自 `Timer1MotorPwm` 暴露的 0.5 us Timer1 时基；D13 的 TRIG 用非阻塞状态机保持至少 10 us 高电平。默认 60 ms 发起一次测距，连续 2 次小于 200 mm 才进入避障停车，连续 2 次清空才恢复传感器稳定阶段。
 
 Timer1 同时承担电机软件 PWM 和 control tick。`Timer1MotorPwm` 在主循环中把 0-255 duty 转换为周期起始高电平 mask 和最多四个 falling edge event；ISR 只做端口置位/清位、edge 调度和 tick 计数。
 
@@ -84,6 +90,7 @@ Timer1 同时承担电机软件 PWM 和 control tick。`Timer1MotorPwm` 在主�
 - ADC：`kAdcBlackThreshold`、`kAdcHysteresis`。
 - PID：`kPidKpQ8`、`kPidKiQ8`、`kPidKdQ8`、`kPidIntegralLimit`、`kPidMaxCorrection`。
 - 失线：`kAmbiguousCenterLimitTicks`、`kLineLostStopTicks`。
+- 避障：`kObstacleStopDistanceMm`、`kObstacleConfirmSamples`、`kObstacleClearSamples`、`kUltrasonicMeasurementIntervalMs`。
 
 修改 `Pins.h` 属于硬件接线变更，需要先确认板卡原理图或实测结果，并同步更新文档和验证计划。
 
@@ -100,10 +107,11 @@ Timer1 同时承担电机软件 PWM 和 control tick。`Timer1MotorPwm` 在主�
 ## 首次校准顺序
 
 1. 只接传感器，确认 EN 有效电平、黑线电平和 A0/A1 左右对应关系。
-2. 轮子离地，低 PWM 点动左电机和右电机，确认方向。
-3. 根据实测结果调整 `kInvertLeftMotor`、`kInvertRightMotor`、`kLeftForwardUsesIb`、`kRightForwardUsesIb`。
-4. 测最低启动 PWM、低速连续运行温升和电池压降，再决定是否提高 `kMotorMaxPwm`。
-5. 先调 P，再调 D，最后决定是否需要 I；每次调整都记录硬件条件。
+2. 只接超声波模块，确认 D13 TRIG、D12 ECHO、5 V/GND 和共地，先用静止障碍物核对 20-400 cm 量程内读数趋势。
+3. 轮子离地，低 PWM 点动左电机和右电机，确认方向。
+4. 根据实测结果调整 `kInvertLeftMotor`、`kInvertRightMotor`、`kLeftForwardUsesIb`、`kRightForwardUsesIb`。
+5. 测最低启动 PWM、低速连续运行温升和电池压降，再决定是否提高 `kMotorMaxPwm`。
+6. 先调 P，再调 D，最后决定是否需要 I；每次调整都记录硬件条件。
 
 ## 设计记录
 
@@ -111,6 +119,7 @@ Timer1 同时承担电机软件 PWM 和 control tick。`Timer1MotorPwm` 在主�
 - [ADR-001: 黑线循迹小车首版架构](docs/decisions/ADR-001-line-follower-architecture.md)
 - [ADR-002: 直接寄存器实现 ADC 与 PWM](docs/decisions/ADR-002-direct-register-adc-pwm.md)
 - [ADR-003: 使用 Timer1 作为电机 PWM 与控制 tick 专用时基](docs/decisions/ADR-003-timer1-motor-timebase.md)
+- [ADR-004: 使用 PCINT 和 Timer1 时间戳实现超声波避障](docs/decisions/ADR-004-ultrasonic-obstacle-avoidance.md)
 
 ## 许可证
 

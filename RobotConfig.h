@@ -28,10 +28,12 @@ constexpr uint8_t kControlPeriodsPerTick = 40;
 constexpr uint16_t kPwmPeriodTicks = kTimer1PwmTop + 1;
 constexpr uint16_t kPwmFrequencyHz = BoardProfile::kCpuHz / kTimer1Prescaler / kPwmPeriodTicks;
 constexpr uint16_t kControlTickHz = kPwmFrequencyHz / kControlPeriodsPerTick;
+constexpr uint8_t kTimer1TicksPerMicrosecond = BoardProfile::kCpuHz / kTimer1Prescaler / 1000000UL;
 
 static_assert(kPwmFrequencyHz == 4000, "默认 PWM 频率必须是 4 kHz。");
 static_assert(kControlTickHz == 100, "控制周期必须是 10 ms。");
 static_assert(kTimer1PwmTop < 65535, "Timer1 TOP 必须落在 16-bit 范围内。");
+static_assert(kTimer1TicksPerMicrosecond == 2, "Timer1 时间戳必须保持 0.5 us 分辨率。");
 
 // L9110S-MS 供应链参数为 2.5-12 V、1.2 A continuous、2.0 A peak；固件默认保守限幅。
 constexpr uint8_t kPwmFullScale = 255;
@@ -60,6 +62,29 @@ constexpr uint16_t kAdcHysteresis = 24;
 constexpr uint8_t kSensorSettleControlTicks = 10;
 constexpr uint8_t kAmbiguousCenterLimitTicks = 50;
 constexpr uint8_t kLineLostStopTicks = 80;
+
+constexpr bool kObstacleAvoidanceEnabled = true;
+constexpr uint16_t kObstacleStopDistanceMm = 200;
+constexpr uint8_t kObstacleConfirmSamples = 2;
+constexpr uint8_t kObstacleClearSamples = 2;
+
+constexpr uint8_t kUltrasonicTriggerPulseUs = 10;
+constexpr uint16_t kUltrasonicMeasurementIntervalMs = 60;
+constexpr uint16_t kUltrasonicEchoTimeoutUs = 38000;
+constexpr uint16_t kUltrasonicMaxDistanceMm = 4000;
+constexpr uint16_t kUltrasonicNearFieldDistanceMm = 20;
+
+constexpr uint32_t kUltrasonicTriggerPulseTimerTicks =
+    static_cast<uint32_t>(kUltrasonicTriggerPulseUs) * kTimer1TicksPerMicrosecond;
+constexpr uint32_t kUltrasonicMeasurementIntervalTimerTicks =
+    static_cast<uint32_t>(kUltrasonicMeasurementIntervalMs) * 1000UL * kTimer1TicksPerMicrosecond;
+constexpr uint32_t kUltrasonicEchoTimeoutTimerTicks =
+    static_cast<uint32_t>(kUltrasonicEchoTimeoutUs) * kTimer1TicksPerMicrosecond;
+
+static_assert(kObstacleStopDistanceMm > kUltrasonicNearFieldDistanceMm,
+              "避障停车距离必须高于 HC-SR04 近场不可靠区。");
+static_assert(kUltrasonicTriggerPulseUs >= 10, "HC-SR04 TRIG 高电平至少需要 10 us。");
+static_assert(kUltrasonicMeasurementIntervalMs >= 60, "HC-SR04 两次测距间隔至少保守取 60 ms。");
 
 // PID 使用 Q8 定点增益：实际增益 = 常量 / 256。
 constexpr int16_t kPidKpQ8 = 18;

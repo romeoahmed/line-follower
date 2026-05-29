@@ -7,6 +7,7 @@ void RobotController::begin() {
   Timer1MotorPwm::begin();
   motors_.begin();
   sensors_.begin();
+  ultrasonic_.begin();
   pid_.reset();
 
   settleTicks_ = 0;
@@ -18,6 +19,8 @@ void RobotController::begin() {
 }
 
 void RobotController::poll() {
+  ultrasonic_.poll();
+
   const uint8_t ticks = Timer1MotorPwm::takeControlTicks();
   if (ticks == 0) {
     return;
@@ -32,6 +35,18 @@ void RobotController::poll() {
 }
 
 void RobotController::runControlStep() {
+  ultrasonic_.poll();
+
+  if (state_ == RobotState::kObstacleStop) {
+    handleObstacleStop();
+    return;
+  }
+
+  if (RobotConfig::kObstacleAvoidanceEnabled && ultrasonic_.obstaclePresent()) {
+    enterObstacleStop();
+    return;
+  }
+
   if (state_ == RobotState::kSensorSettle) {
     handleSensorSettle();
     return;
@@ -46,6 +61,9 @@ void RobotController::runControlStep() {
     break;
   case RobotState::kLineLost:
     handleLineLost(estimate);
+    break;
+  case RobotState::kObstacleStop:
+    handleObstacleStop();
     break;
   case RobotState::kStopped:
     motors_.setTargetSpeeds(0, 0);
@@ -136,11 +154,33 @@ void RobotController::handleLineLost(const LineEstimate& estimate) {
   motors_.update();
 }
 
+void RobotController::handleObstacleStop() {
+  if (RobotConfig::kObstacleAvoidanceEnabled && ultrasonic_.obstaclePresent()) {
+    motors_.stopNow();
+    return;
+  }
+
+  settleTicks_ = 0;
+  ambiguousTicks_ = 0;
+  lostTicks_ = 0;
+  lastError_ = 0;
+  pid_.reset();
+  state_ = RobotState::kSensorSettle;
+}
+
 void RobotController::enterLineLost() {
   state_ = RobotState::kLineLost;
   lostTicks_ = 0;
   ambiguousTicks_ = 0;
   pid_.reset();
+}
+
+void RobotController::enterObstacleStop() {
+  state_ = RobotState::kObstacleStop;
+  ambiguousTicks_ = 0;
+  lostTicks_ = 0;
+  pid_.reset();
+  motors_.stopNow();
 }
 
 void RobotController::enterStopped() {

@@ -18,6 +18,8 @@ void begin();
 void submit(const DutyFrame& duty);
 void emergencyStop();
 uint8_t takeControlTicks();
+uint32_t captureTimeTicks();
+uint32_t captureTimeTicksFromIsr();
 
 // 小工具保持公开，方便后续 host 测试直接覆盖 duty 映射。
 uint16_t dutyToEdgeTick(uint8_t duty);

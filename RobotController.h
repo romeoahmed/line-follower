@@ -3,6 +3,7 @@
 #include "LineEstimator.h"
 #include "MotorDriver.h"
 #include "PidController.h"
+#include "UltrasonicRangeSensor.h"
 
 namespace lf {
 
@@ -11,6 +12,7 @@ enum class RobotState : uint8_t {
   kSensorSettle,
   kFollowLine,
   kLineLost,
+  kObstacleStop,
   kStopped,
 };
 
@@ -28,6 +30,7 @@ class RobotController {
 
  private:
   LineSensors sensors_;
+  UltrasonicRangeSensor ultrasonic_;
   MotorDriver motors_;
   PidController pid_;
   RobotState state_ = RobotState::kBoot;
@@ -41,7 +44,9 @@ class RobotController {
   void handleSensorSettle();
   void handleFollowLine(const LineEstimate& estimate);
   void handleLineLost(const LineEstimate& estimate);
+  void handleObstacleStop();
   void enterLineLost();
+  void enterObstacleStop();
   void enterStopped();
   static int16_t clampMotorCommand(int16_t value);
 };

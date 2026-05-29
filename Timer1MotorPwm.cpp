@@ -31,6 +31,7 @@ volatile bool g_shadowPending = false;
 volatile uint8_t g_edgeIndex = 0;
 volatile uint8_t g_controlPeriodCounter = 0;
 volatile uint8_t g_controlTicksDue = 0;
+volatile uint32_t g_timeBaseTicks = 0;
 
 // active 由 ISR 使用，shadow 由主循环提交；只在周期边界换帧。
 PreparedFrame makeEmptyFrame() {
@@ -192,6 +193,7 @@ void begin() {
   g_edgeIndex = 0;
   g_controlPeriodCounter = 0;
   g_controlTicksDue = 0;
+  g_timeBaseTicks = 0;
 
   TCCR1A = 0;
   TCCR1B = 0;
@@ -239,7 +241,30 @@ uint8_t takeControlTicks() {
   return ticks;
 }
 
+uint32_t captureTimeTicksFromIsr() {
+  uint32_t base = g_timeBaseTicks;
+  const uint16_t counter = TCNT1;
+
+  // If COMPA is pending while interrupts are masked, CTC may already have wrapped
+  // TCNT1 before onPeriodCompareIsr() advances the software epoch.
+  if ((TIFR1 & _BV(OCF1A)) != 0 && counter < RobotConfig::kTimer1PwmTop) {
+    base += RobotConfig::kPwmPeriodTicks;
+  }
+
+  return base + counter;
+}
+
+uint32_t captureTimeTicks() {
+  const uint8_t oldSreg = SREG;
+  cli();
+  const uint32_t ticks = captureTimeTicksFromIsr();
+  SREG = oldSreg;
+  return ticks;
+}
+
 void onPeriodCompareIsr() {
+  g_timeBaseTicks += RobotConfig::kPwmPeriodTicks;
+
   // 周期 ISR 是唯一换帧点，避免主循环提交时撕裂 PWM 输出。
   if (g_shadowPending) {
     copyFrame(g_activeFrame, g_shadowFrame);
