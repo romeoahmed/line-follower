@@ -1,6 +1,7 @@
 #pragma once
 
 #include "BoardProfile.h"
+#include "PdController.h"
 
 namespace lf {
 
@@ -40,16 +41,26 @@ static_assert(kControlTickHz == 100, "控制周期必须是 10 ms。");
 static_assert(kTimer1PwmTop < 65535, "Timer1 TOP 必须落在 16-bit 范围内。");
 static_assert(kTimer1TicksPerMicrosecond == 2, "Timer1 时间戳必须保持 0.5 us 分辨率。");
 
-// L9110S-MS 供应链参数为 2.5-12 V、1.2 A continuous、2.0 A peak；固件默认保守限幅。
+// L9110S-MS 供应链参数 2.5-12 V、1.2 A continuous、2.0 A peak，固件默认保守限幅。
+//
+// PWM 数值语义（默认 kBrakeHighSideInversePwm 驱动模式，ADR-006）：方向输入整
+// 周期 HIGH，另一输入输出 (255-duty) 反相 PWM。kMotor*Pwm 数值 = 电机两端有效
+// 驱动占空比 × 255：duty=128 ≈ 50% 驱动，duty=255 = 整周期驱动。
+//
+// 教学小车减速直流电机典型空载启动电压 1.5-2.5 V，带摩擦后通常需要 40-60% 驱动
+// 才能可靠起步。当前默认 50-65% 配合 kMotorMinimumEffectivePwm 跳过死区。硬件
+// 阶段实测电流、温升、电池压降后再决定是否继续上调 kMotorMaxPwm。
 constexpr uint8_t kPwmFullScale = 255;
-constexpr uint8_t kMotorStraightPwm = 92;
-constexpr uint8_t kMotorCurvePwm = 78;
-constexpr uint8_t kMotorCautiousPwm = 68;
-constexpr uint8_t kMotorSearchPwm = 68;
-constexpr uint8_t kMotorMaxPwm = 150;
-constexpr uint8_t kMotorRampStepPerControlTick = 8;
+constexpr uint8_t kMotorStraightPwm = 160;
+constexpr uint8_t kMotorCurvePwm = 130;
+constexpr uint8_t kMotorCautiousPwm = 110;
+constexpr uint8_t kMotorSearchPwm = 140;
+constexpr uint8_t kMotorMaxPwm = 200;
+constexpr uint8_t kMotorRampStepPerControlTick = 12;
 constexpr uint8_t kDirectionBlankControlTicks = 1;
-constexpr uint8_t kMotorMinimumEffectivePwm = 0;
+// 启动死区跳变：current 跨 0 时 MotorDriver 直接跳到至少这个量级，避免 ramp 头
+// 几步停在电机死区。设为 0 关闭此机制。
+constexpr uint8_t kMotorMinimumEffectivePwm = 90;
 constexpr int16_t kLeftMotorTrimPermille = 0;
 constexpr int16_t kRightMotorTrimPermille = 0;
 
@@ -78,8 +89,11 @@ constexpr uint16_t kAdcBlackThreshold = 512;
 constexpr uint16_t kAdcHysteresis = 24;
 
 constexpr uint8_t kSensorSettleControlTicks = 10;
-// 0 表示不凭“传感器夹线时的双白中心候选”强行判定失线。
-constexpr uint8_t kAmbiguousCenterLimitTicks = 0;
+// 在 BetweenSensors 模式下，双白可能是“线在两个传感器之间正常居中”，也可能是“车已经
+// 飞出轨道”。只有当过去看到过偏差（lastError != 0）后才计时，避免长直线居中场景误判。
+// 之后再持续双白达到这个 tick 数，就进入失线状态去搜线/超时停车——这是默认安全行为，
+// 不是可选启发式。0 关闭该机制（不推荐：意味着脱轨后小车会一直按 cautious 速度直行）。
+constexpr uint8_t kAmbiguousCenterLimitTicks = 80;
 constexpr uint8_t kLineLostStopTicks = 80;
 
 constexpr bool kObstacleAvoidanceEnabled = true;
@@ -87,10 +101,13 @@ constexpr uint16_t kObstacleStopDistanceMm = 200;
 constexpr uint8_t kObstacleConfirmSamples = 2;
 constexpr uint8_t kObstacleClearSamples = 2;
 constexpr uint8_t kObstacleStopHoldControlTicks = 8;
-constexpr uint8_t kObstacleRightTurnPwm = 72;
+// 原地转向比直行更难启动（两轮反向、轮胎横向摩擦更大），右转 PWM 要明显高于直行下限。
+constexpr uint8_t kObstacleRightTurnPwm = 140;
 constexpr uint16_t kObstacleRightTurnControlTicks = 55;
 
-constexpr uint8_t kUltrasonicTriggerPulseUs = 10;
+// HC-SR04 datasheet 标注最小 10 us；部分 SR04 克隆要求严格大于 10 us。这里留 2 us
+// 余量，吸收主循环到 finishTriggerIfDue() 的轮询抖动以及 Timer1/PCINT ISR 抢占。
+constexpr uint8_t kUltrasonicTriggerPulseUs = 12;
 constexpr uint16_t kUltrasonicMeasurementIntervalMs = 60;
 constexpr uint16_t kUltrasonicEchoTimeoutUs = 38000;
 constexpr uint16_t kUltrasonicMaxDistanceMm = 4000;
@@ -110,23 +127,18 @@ static_assert(kObstacleRightTurnControlTicks > 0, "避障右转持续时间必�
 static_assert(kUltrasonicTriggerPulseUs >= 10, "HC-SR04 TRIG 高电平至少需要 10 us。");
 static_assert(kUltrasonicMeasurementIntervalMs >= 60, "HC-SR04 两次测距间隔至少保守取 60 ms。");
 
-// PID 使用 Q8 定点增益：实际增益 = 常量 / 256。
-struct PidGainsQ8 {
-  int16_t kp;
-  int16_t ki;
-  int16_t kd;
-};
-
-constexpr PidGainsQ8 kPidStraightGainsQ8 = {12, 0, 4};
-constexpr PidGainsQ8 kPidCurveGainsQ8 = {22, 0, 10};
-constexpr int16_t kPidIntegralLimit = 4000;
-constexpr int16_t kPidStraightMaxCorrection = 50;
-constexpr int16_t kPidCurveMaxCorrection = 86;
+// PD 增益类型由 PdController 定义；这里只给出每个 profile 的标定值。
+constexpr PdGainsQ8 kPdStraightGainsQ8 = {12, 4};
+constexpr PdGainsQ8 kPdCurveGainsQ8 = {22, 10};
+constexpr int16_t kPdStraightMaxCorrection = 50;
+constexpr int16_t kPdCurveMaxCorrection = 86;
 constexpr int16_t kLineErrorUnit = 1000;
 constexpr int16_t kLineCurveErrorThreshold = kLineErrorUnit / 2;
 
-static_assert(kPidStraightMaxCorrection <= kMotorMaxPwm, "直线 PID 修正量不能超过电机限幅。");
-static_assert(kPidCurveMaxCorrection <= kMotorMaxPwm, "弯道 PID 修正量不能超过电机限幅。");
+static_assert(kPdStraightMaxCorrection >= 0 && kPdStraightMaxCorrection <= kMotorMaxPwm,
+              "直线 PD 修正量必须非负且不超过电机限幅。");
+static_assert(kPdCurveMaxCorrection >= 0 && kPdCurveMaxCorrection <= kMotorMaxPwm,
+              "弯道 PD 修正量必须非负且不超过电机限幅。");
 static_assert(kLineCurveErrorThreshold > 0, "弯道判断阈值必须为正。");
 
 } // namespace RobotConfig

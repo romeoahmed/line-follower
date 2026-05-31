@@ -4,6 +4,9 @@
 
 namespace lf {
 
+// 有符号 (left, right) 命令 → trim → ramp → 死区跳变 → 方向切换空档 →
+// driveMode 映射 → 四路 L9110 输入。无状态计算下沉到 .cpp 的匿名命名空间。
+// 见 ADR-010。
 class MotorDriver {
  public:
   void begin();
@@ -29,14 +32,7 @@ class MotorDriver {
   MotorState left_ = {};
   MotorState right_ = {};
 
-  static int16_t clampSignedPwm(int16_t value);
-  static int16_t applyCompensation(int16_t value, int16_t trimPermille);
-  static int16_t rampToward(int16_t current, int16_t target);
   static void stepMotor(MotorState* state);
-  static uint8_t magnitude(int16_t value);
-  static int8_t signOf(int16_t value);
-  static void applySide(int16_t signedPwm, bool invert, bool forwardUsesIb, uint8_t* iaDuty,
-                        uint8_t* ibDuty);
   Timer1MotorPwm::DutyFrame makeDutyFrame() const;
 };
 

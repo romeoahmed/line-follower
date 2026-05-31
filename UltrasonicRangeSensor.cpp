@@ -1,5 +1,7 @@
 #include "UltrasonicRangeSensor.h"
 
+#include "AtomicGuard.h"
+
 #include <avr/interrupt.h>
 
 namespace lf {
@@ -19,12 +21,17 @@ volatile uint32_t g_echoRiseTicks = 0;
 volatile uint32_t g_echoPulseTicks = 0;
 volatile bool g_pulsePending = false;
 volatile bool g_timeoutPending = false;
+uint8_t g_instanceCount = 0;
 
+// 模算术差比较：32-bit Timer1 时基约 35 分钟回卷一次。无符号减法在补码上等价于
+// (now - since) mod 2^32，所以只要测量间隔 ≪ 2^31 ticks，wrap 后比较仍然正确。
 bool elapsedAtLeast(const uint32_t nowTicks, const uint32_t sinceTicks,
                     const uint32_t durationTicks) {
   return static_cast<uint32_t>(nowTicks - sinceTicks) >= durationTicks;
 }
 
+// 同理：先做无符号减法再转 int32_t 取符号，能正确处理 deadline 跨过 2^32 的情况，
+// 只要 |now - deadline| < 2^31。
 bool deadlineReached(const uint32_t nowTicks, const uint32_t deadlineTicks) {
   return static_cast<int32_t>(nowTicks - deadlineTicks) >= 0;
 }
@@ -34,54 +41,43 @@ bool readEchoHigh() {
 }
 
 void writeTriggerHigh(const bool high) {
-  const uint8_t oldSreg = SREG;
-  cli();
+  AtomicGuard guard;
   if (high) {
     PORTB |= kTriggerMask;
   } else {
     PORTB &= static_cast<uint8_t>(~kTriggerMask);
   }
-  SREG = oldSreg;
 }
 
 void armEchoCapture() {
-  const uint8_t oldSreg = SREG;
-  cli();
+  AtomicGuard guard;
   g_captureState = EchoCaptureState::kWaitingForRise;
   g_echoRiseTicks = 0;
   g_echoPulseTicks = 0;
   g_pulsePending = false;
   g_timeoutPending = false;
-  SREG = oldSreg;
 }
 
 bool echoCaptureBusy() {
-  const uint8_t oldSreg = SREG;
-  cli();
-  const bool busy = g_captureState != EchoCaptureState::kIdle;
-  SREG = oldSreg;
-  return busy;
+  AtomicGuard guard;
+  return g_captureState != EchoCaptureState::kIdle;
 }
 
 void markEchoTimeout() {
-  const uint8_t oldSreg = SREG;
-  cli();
+  AtomicGuard guard;
   if (g_captureState != EchoCaptureState::kIdle) {
     g_captureState = EchoCaptureState::kIdle;
     g_timeoutPending = true;
   }
-  SREG = oldSreg;
 }
 
 void cancelEchoCapture() {
-  const uint8_t oldSreg = SREG;
-  cli();
+  AtomicGuard guard;
   g_captureState = EchoCaptureState::kIdle;
   g_echoRiseTicks = 0;
   g_echoPulseTicks = 0;
   g_pulsePending = false;
   g_timeoutPending = false;
-  SREG = oldSreg;
 }
 
 bool takeEchoResult(uint32_t* pulseTicks, bool* timedOut) {
@@ -89,24 +85,20 @@ bool takeEchoResult(uint32_t* pulseTicks, bool* timedOut) {
     return false;
   }
 
-  const uint8_t oldSreg = SREG;
-  cli();
-
-  bool hasResult = false;
+  AtomicGuard guard;
   if (g_pulsePending) {
     *pulseTicks = g_echoPulseTicks;
     *timedOut = false;
     g_pulsePending = false;
-    hasResult = true;
-  } else if (g_timeoutPending) {
+    return true;
+  }
+  if (g_timeoutPending) {
     *pulseTicks = 0;
     *timedOut = true;
     g_timeoutPending = false;
-    hasResult = true;
+    return true;
   }
-
-  SREG = oldSreg;
-  return hasResult;
+  return false;
 }
 
 void onEchoPinChangeFromIsr() {
@@ -127,11 +119,10 @@ void onEchoPinChangeFromIsr() {
 }
 
 void beginUltrasonicPinsAndInterrupt() {
-  const uint8_t oldSreg = SREG;
-  cli();
+  AtomicGuard guard;
 
   DDRB |= kTriggerMask;
-  writeTriggerHigh(false);
+  PORTB &= static_cast<uint8_t>(~kTriggerMask);
 
   DDRB &= static_cast<uint8_t>(~kEchoMask);
   PORTB &= static_cast<uint8_t>(~kEchoMask);
@@ -145,15 +136,33 @@ void beginUltrasonicPinsAndInterrupt() {
   PCIFR = _BV(PCIF0);
   PCMSK0 |= _BV(Pins::kUltrasonicEchoPcint);
   PCICR |= _BV(PCIE0);
-
-  SREG = oldSreg;
 }
 
 } // namespace
 
+UltrasonicRangeSensor::UltrasonicRangeSensor() {
+  ++g_instanceCount;
+}
+
+UltrasonicRangeSensor::~UltrasonicRangeSensor() {
+  if (g_instanceCount > 0) {
+    --g_instanceCount;
+  }
+}
+
 void UltrasonicRangeSensor::begin() {
+  // PCINT0 ISR 状态在文件全局 g_* 中——多实例会互相踩。检查放在 begin() 而不是
+  // 构造里：全局对象构造顺序不可控；进 begin() 时 setup() 已完，cli + 死循环
+  // 能让硬件调试者立刻发现。
+  if (g_instanceCount != 1) {
+    cli();
+    while (true) {
+    }
+  }
   beginUltrasonicPinsAndInterrupt();
 
+  // 把"上次 trigger"故意倒推一个完整间隔，让 startMeasurementIfDue() 在首次
+  // poll() 时就立刻发起测量，而不是空等一个间隔后才动。
   const uint32_t nowTicks = Timer1MotorPwm::captureTimeTicks();
   lastTriggerTicks_ = nowTicks - RobotConfig::kUltrasonicMeasurementIntervalTimerTicks;
   triggerEndTicks_ = 0;
@@ -170,6 +179,7 @@ void UltrasonicRangeSensor::restartAfterManeuver() {
   writeTriggerHigh(false);
   cancelEchoCapture();
 
+  // 同 begin()：倒推一个间隔，避障机动结束后立刻重新开始测距。
   const uint32_t nowTicks = Timer1MotorPwm::captureTimeTicks();
   lastTriggerTicks_ = nowTicks - RobotConfig::kUltrasonicMeasurementIntervalTimerTicks;
   triggerEndTicks_ = 0;
@@ -283,7 +293,9 @@ uint16_t UltrasonicRangeSensor::pulseTicksToMicroseconds(const uint32_t pulseTic
 }
 
 uint16_t UltrasonicRangeSensor::pulseTicksToMillimeters(const uint32_t pulseTicks) {
-  // HC-SR04 family: distance in cm is echo_us / 58. Timer1 tick is 0.5 us.
+  // HC-SR04: distance_cm = echo_us / 58；tick = 0.5 µs；echo_us = pulseTicks/2；
+  // distance_mm = pulseTicks * 5 / 58。+29 (=58/2) = 四舍五入。
+  // 上限校验：echo-timeout 38 ms ⇒ pulseTicks ≤ 76000 ⇒ ×5 ≤ 380000，远低于 2^32。
   return static_cast<uint16_t>((pulseTicks * 5UL + 29UL) / 58UL);
 }
 

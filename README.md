@@ -1,29 +1,22 @@
 # 黑线循迹小车固件
 
-这是一个面向 Arduino UNO 兼容、ATmega328P-AU 教学小车板的黑线循迹固件。项目目标不是通用 Arduino 示例，而是在固定接线、低资源 AVR 环境下实现可审计、低开销、默认安全的循迹控制。
+面向 **Arduino UNO 兼容、ATmega328P-AU 教学小车板** 的黑线循迹固件。在固定接线、低资源 AVR 环境下做可审计、低开销、默认安全的循迹与避障控制。
 
-## 当前状态
+不追求跨板可移植性：`Pins.h` 是接线事实源，代码直接依赖 ArduinoCore-avr standard variant 的 UNO 引脚表。
 
-- 目标板：Arduino UNO 兼容板，ATmega328P，16 MHz，ArduinoCore-avr standard variant。
-- 电机驱动：按 L9110S-MS 双输入模型设计，默认采用教师参考代码暗示的高侧刹车/反相 PWM 模式，保留斜率限制和可配置左右补偿。
-- 传感器：左右双循迹传感器，默认数字模式，A1/A0 读 OUT，D2/A5 控 EN。
-- 避障：按 `Car_head.h` 接入 HC-SR04/HR-SR04 类超声波模块，D12 读 ECHO，D13 输出 TRIG；确认障碍后停车并开环右转约 90°。
-- PWM 与控制 tick：Timer1 CTC 软件 PWM，默认 4 kHz；每 40 个 PWM 周期产生 10 ms 控制 tick。
-- 生产控制路径：不使用 `digitalRead()`、`digitalWrite()`、`analogRead()`、`analogWrite()`、`String` 或动态分配。
-- Timer 边界：只手写 Timer1；Timer0 和 Timer2 保持 Arduino core 原状。
+## 功能概述
 
-## 快速开始
+- **电机驱动**：L9110S-MS 双输入；默认高侧刹车 / 反相 PWM 模式，含 ramp、启动死区跳变、方向切换空档、左右补偿。
+- **PWM 与控制 tick**：Timer1 CTC 软件 PWM @ 4 kHz；每 40 个 PWM 周期一次 10 ms 控制 tick。Timer0 / Timer2 完全不动。
+- **循迹**：A0 / A1 双数字传感器，D2 / A5 控 EN；3 样本多数表决；保留 ADC 模式备用。
+- **避障**：D13 TRIG、D12 ECHO（通过 ATmega328P PCINT4 捕获，非阻塞）；连续 2 帧 ≤ 200 mm 进入停车，再开环右转。
+- **控制算法**：整数 Q8 **PD**（无 I——见 ADR-008），按 `{直线 / 弯道 / 保守 / 寻线}` profile 切换增益与限幅；失线后按最后误差低速搜索，超时停车。
 
-如果后续环境提供 Arduino CLI，可安装 AVR core：
+## 编译
 
 ```sh
 arduino-cli core update-index
 arduino-cli core install arduino:avr
-```
-
-工具链可用时编译：
-
-```sh
 arduino-cli compile --fqbn arduino:avr:uno --warnings all .
 ```
 
@@ -31,96 +24,132 @@ arduino-cli compile --fqbn arduino:avr:uno --warnings all .
 
 | 路径 | 作用 |
 |---|---|
-| `line-follower.ino` | Arduino sketch 入口，只创建并轮询 `RobotController`。 |
-| `BoardProfile.h` | 编译期约束 ATmega328P、16 MHz、UNO standard pin map。 |
-| `Pins.h` | 唯一接线事实源，保存功能、Arduino 引脚、AVR 端口位和 ADC 通道。 |
-| `RobotConfig.h` | Timer1、PWM、分层速度、PID profile、传感器极性、电机极性、失线和避障策略配置。 |
-| `FastIo.h` | 固定端口位的传感器 EN/OUT 操作。 |
-| `AdcDriver.*` | ADC0/ADC1 直接寄存器读取，模拟模式使用。 |
-| `Timer1MotorPwm.*` | Timer1 CTC 初始化、四路软件 PWM、10 ms control tick。 |
-| `MotorDriver.*` | L9110S-MS 有符号速度、驱动模式、方向反转、限幅、斜率限制和方向空档。 |
-| `LineSensors.*` | 数字/ADC 传感器采样、极性配置、3 样本多数表决。 |
-| `LineEstimator.*` | 双传感器黑白状态到离散误差和失线标记的转换。 |
-| `PidController.*` | 整数 Q8 定点 PID，支持按路况切换增益和输出限幅。 |
-| `UltrasonicRangeSensor.*` | D13 TRIG、D12 ECHO，使用 PCINT0 捕获回波宽度，非阻塞避障测距。 |
-| `RobotController.*` | 主状态机、10 ms 控制循环、分层循迹、失线搜索、开环右转避障和停车。 |
-| `docs/line-follower-plan-and-spec.md` | 详细技术规范、接线规范、验证策略和开放问题。 |
-| `docs/decisions/` | 架构和定时器/寄存器决策记录。 |
+| `line-follower.ino` | Sketch 入口；构造 `RobotController` 并轮询 `poll()`。 |
+| `BoardProfile.h` | 编译期断言：ATmega328P、16 MHz、UNO standard variant。 |
+| `AtomicGuard.h` | RAII：SREG save + `cli()` + restore；ISR 临界区只能通过它进入。 |
+| `Pins.h` | 接线事实源：功能名 → Arduino 引脚 → AVR 端口位 → ADC 通道。 |
+| `RobotConfig.h` | 所有可调参数：Timer1、PWM、分层速度、PID profile、传感器/电机极性、失线、避障。 |
+| `FastIo.h` | 头文件库，传感器 EN/OUT 的直接端口操作。 |
+| `AdcDriver.*` | 直接寄存器读 ADC0 / ADC1。 |
+| `Timer1MotorPwm.*` | Timer1 CTC、四路软件 PWM、控制 tick、0.5 µs 时间戳。 |
+| `MotorDriver.*` | 有符号速度、限幅、左右 trim、ramp、启动死区跳变、方向切换空档、驱动模式映射。 |
+| `LineSensors.*` | 数字/模拟采样、极性、3 样本多数表决。 |
+| `LineEstimator.*` | 双传感器布尔值 → `LineState` enum（互斥的 6 态）+ 离散误差。 |
+| `PdController.*` | 整数 Q8 PD（只有 P + D，没有 I）；调用方传入 profile 增益与限幅。 |
+| `UltrasonicRangeSensor.*` | 非阻塞 TRIG 状态机、PCINT0 ECHO 捕获、距离换算、避障 latch。 |
+| `RobotController.*` | 主状态机；10 ms 控制循环；分层循迹；失线搜索；避障停车与开环右转。 |
+| `docs/line-follower-plan-and-spec.md` | 详细规范、接线、验证策略、开放问题。 |
+| `docs/decisions/` | 架构决策记录（ADR-001 至 ADR-010）。 |
 
-## 接线事实
+## 接线
 
-`Pins.h` 是唯一接线事实源。除非同时更新代码、文档和硬件验证计划，不要在其它文件中散落裸引脚号。
-
-| 功能 | Arduino 引脚 | AVR 端口/位 | 首版用途 |
+| 功能 | Arduino 引脚 | AVR 端口位 | 备注 |
 |---|---:|---|---|
-| 左电机 IB | D3 | PD3 | Timer1 软件 PWM |
-| 左电机 IA | D5 | PD5 | Timer1 软件 PWM |
-| 右电机 IB | D9 | PB1 | Timer1 软件 PWM，OC1A 断开 |
-| 右电机 IA | D10 | PB2 | Timer1 软件 PWM，OC1B 断开 |
+| 左电机 IB | D3 | PD3 | Timer1 软件 PWM 输出 |
+| 左电机 IA | D5 | PD5 | Timer1 软件 PWM 输出 |
+| 右电机 IB | D9 | PB1 | Timer1 软件 PWM；OC1A 断开 |
+| 右电机 IA | D10 | PB2 | Timer1 软件 PWM；OC1B 断开 |
 | 左循迹 EN | D2 | PD2 | 直接写 PORTD2 |
 | 右循迹 EN | A5 | PC5 | 直接写 PORTC5 |
-| 左循迹 OUT | A1 | PC1/ADC1 | 数字读 PINC1 或 ADC1 |
-| 右循迹 OUT | A0 | PC0/ADC0 | 数字读 PINC0 或 ADC0 |
-| 超声波 ECHO | D12 | PB4/PCINT4 | Pin-change interrupt 捕获回波 |
-| 超声波 TRIG | D13 | PB5 | 直接写 PORTB5，和蓝牙 RX 复用，不同时使用 |
+| 左循迹 OUT | A1 | PC1 / ADC1 | 数字读 PINC1 或 ADC1 |
+| 右循迹 OUT | A0 | PC0 / ADC0 | 数字读 PINC0 或 ADC0 |
+| 超声波 ECHO | D12 | PB4 / PCINT4 | PCINT0_vect 捕获回波边沿 |
+| 超声波 TRIG | D13 | PB5 | 与板载 LED / SCK / 蓝牙 RX 复用，不并用 |
 
-A6/A7 只作为 ADC-only 硬件事实保留，首版不使用，不能当普通数字 I/O。
+A6 / A7 是 ADC-only 引脚，首版不使用，也不能当数字 I/O。
 
-## 架构要点
+## 工作原理
 
-控制循环由 Timer1 产生的 10 ms tick 驱动。`loop()` 只调用 `RobotController::poll()`，不会用 `micros()` 补跑历史 tick。若主循环错过多个 tick，只记录 missed counter，并使用最新状态继续控制，避免延迟累积。
+### 时钟与控制循环
 
-超声波测距不使用 `pulseIn()`，避免在控制路径等待最长回波超时。D12 的 ECHO 由 ATmega328P pin-change interrupt 捕获上升沿和下降沿，时间戳来自 `Timer1MotorPwm` 暴露的 0.5 us Timer1 时基；D13 的 TRIG 用非阻塞状态机保持至少 10 us 高电平。默认 60 ms 发起一次测距，连续 2 次小于 200 mm 才进入避障停车；随后保持短暂停车，再以低速开环右转。没有编码器或陀螺仪时，90°只能由 `kObstacleRightTurnControlTicks` 通过实车标定逼近，不能在固件中数学保证。
+Timer1 在 16 MHz / prescaler 8 / TOP=499 下产生 4 kHz PWM（0.5 µs 分辨率，每个周期 250 µs）。COMPA ISR 每个周期开始置位 PWM 高电平、调度第一个下降沿、推进时基；每 40 个周期置位一次控制 tick。
 
-Timer1 同时承担电机软件 PWM 和 control tick。`Timer1MotorPwm` 在主循环中把 0-255 duty 转换为周期起始高电平 mask 和最多四个 falling edge event；ISR 只做端口置位/清位、edge 调度和 tick 计数。
+`loop()` 只调用 `RobotController::poll()`。`poll()` 高频轮询超声波状态机，并在控制 tick 就绪时跑一次控制步。如果错过多个 tick，记录 `missedControlTicks_` 但只跑最新一帧——不补跑历史 tick，避免延迟累积。
 
-电机层只暴露左右有符号速度。`MotorDriver` 负责限幅、ramp、驱动模式、方向反转、方向切换低电平空档、左右 trim 和可选最低有效 PWM。默认驱动模式为方向输入整周期 HIGH、另一输入 `255-duty` 反相 PWM；`speed = 0` 和换向空档仍保持 IA/IB 全 LOW。
+### 电机驱动
 
-传感器默认数字模式，跨控制 tick 做 3 样本多数表决；模拟模式保留 ADC0/ADC1 直接寄存器读取、阈值和滞回，但不调用 `analogRead()`。
+默认模式（`kBrakeHighSideInversePwm`）：方向输入整周期 HIGH，另一输入输出 `255 - duty` 反相 PWM。
 
-## 配置入口
+| 状态 | 方向输入 | 另一输入 |
+|---|---|---|
+| 停止 / 滑行 | LOW | LOW |
+| 有效驱动段 | HIGH | LOW |
+| 刹车段 | HIGH | HIGH |
 
-优先改 `RobotConfig.h` 中的配置，不要把参数写进控制逻辑：
+**重要**：在这种模式下，**有效驱动占空比 = `duty / 255`**——`kMotor*Pwm = 128` 约 50% 驱动，不是 Arduino `analogWrite()` 那种"PWM 高电平就是驱动"的直觉。
 
-- 电机：`kMotorDriveMode`、`kMotorStraightPwm`、`kMotorCurvePwm`、`kMotorCautiousPwm`、`kMotorSearchPwm`、`kMotorMaxPwm`、`kMotorRampStepPerControlTick`、`kLeftMotorTrimPermille`、`kRightMotorTrimPermille`。
-- 方向：`kInvertLeftMotor`、`kInvertRightMotor`、`kLeftForwardUsesIb`、`kRightForwardUsesIb`。
-- 传感器：`kSensorMode`、`kSensorEnableActiveLevel`、`kSensorBlackLevel`、`kCenterMode`。
-- ADC：`kAdcBlackThreshold`、`kAdcHysteresis`。
-- PID：`kPidStraightGainsQ8`、`kPidCurveGainsQ8`、`kPidIntegralLimit`、`kPidStraightMaxCorrection`、`kPidCurveMaxCorrection`。
-- 失线：`kAmbiguousCenterLimitTicks`、`kLineLostStopTicks`。
-- 避障：`kObstacleStopDistanceMm`、`kObstacleConfirmSamples`、`kObstacleStopHoldControlTicks`、`kObstacleRightTurnPwm`、`kObstacleRightTurnControlTicks`、`kUltrasonicMeasurementIntervalMs`。
+`kMotorMinimumEffectivePwm`（默认 90）让 ramp 在跨越 0 时一次性跳到最小有效占空比，再继续按 step 上行，避开电机启动死区。
 
-修改 `Pins.h` 属于硬件接线变更，需要先确认板卡原理图或实测结果，并同步更新文档和验证计划。
+回退模式 `kCoastLowSidePwm`：只给方向输入输出 PWM、另一输入保持 LOW。刹车模式发热或噪声不可接受可切回。
+
+### 超声波避障
+
+D12 不是 UNO 外部中断脚，用 ATmega328P 的 PCINT4 / `PCINT0_vect` 捕获 ECHO 边沿，时间戳来自 Timer1（不引入 Timer0 或 Timer2 用途）。距离按 HC-SR04 datasheet 的 `distance_cm = echo_us / 58` 换算。
+
+默认 60 ms 一次测距，38 ms ECHO 超时；连续 2 帧 ≤ 200 mm 触发：
+
+```
+ObstacleStop（短暂停车）
+  → ObstacleTurnRight（开环按 kObstacleRightTurnControlTicks 维持低速反向差速）
+  → SensorSettle
+```
+
+90° 是开环标定的结果，**不是几何保证**——电池电压、地面摩擦、轮胎都会让它漂移。
+
+### 失线策略
+
+`BetweenSensors` 模式下，双白可能是正常居中也可能是脱轨。**只有过去见过偏差**（`lastError != 0`）后**再**持续双白 `kAmbiguousCenterLimitTicks` 个 tick（默认 80 ≈ 0.8 s）才进入失线——长直线居中场景 `lastError` 一直是 0，永远不会误判（见 ADR-008）。
+
+失线后按最后误差低速原地搜线；超过 `kLineLostStopTicks` 进入 `Stopped`。
+
+## 调参
+
+调参从 `RobotConfig.h` 开始：
+
+- **电机**：`kMotorDriveMode`、`kMotor{Straight,Curve,Cautious,Search}Pwm`、`kMotorMaxPwm`、`kMotorRampStepPerControlTick`、`kMotorMinimumEffectivePwm`、`k{Left,Right}MotorTrimPermille`。**`kMotorMaxPwm` clamp 在 trim 之前应用**：trim 在物理域内做左右差分补偿，饱和时仍生效；不要把控制层 clamp 移到 trim 之后（见 ADR-010 §7 的物理论证）。
+- **方向**：`kInvert{Left,Right}Motor`、`k{Left,Right}ForwardUsesIb`。
+- **传感器**：`kSensorMode`、`kSensorEnableActiveLevel`、`kSensorBlackLevel`、`kCenterMode`、`kAdcBlackThreshold`、`kAdcHysteresis`、`kSensorSettleControlTicks`。
+- **PD**：`kPdStraightGainsQ8`、`kPdCurveGainsQ8`、`kPdStraightMaxCorrection`、`kPdCurveMaxCorrection`、`kLineCurveErrorThreshold`。
+- **失线**：`kAmbiguousCenterLimitTicks`、`kLineLostStopTicks`。
+- **避障**：`kObstacleAvoidanceEnabled`、`kObstacleStopDistanceMm`、`kObstacleConfirmSamples`、`kObstacleClearSamples`、`kObstacleStopHoldControlTicks`、`kObstacleRightTurnPwm`、`kObstacleRightTurnControlTicks`、`kUltrasonicMeasurementIntervalMs`。
+
+改 `Pins.h` 属于硬件接线变更，必须先核对原理图或实测结果，再同步本 README、`docs/line-follower-plan-and-spec.md` 和相关 ADR。
 
 ## 硬件安全
 
-- 断电接线，USB 和电池都先断开。
-- 电机供电不要从 Arduino 5 V 或电脑 USB 取电。
-- MCU GND、电机驱动 GND、传感器 GND 和电池负极必须共地。
-- 上传或串口调试时，如果没有板卡电源路径说明，关闭电机电源。
-- 第一次电机测试时轮子离地，从低 PWM 单轮点动开始。
-- 不要把 L9110S-MS 的峰值电流当连续能力，必须在硬件阶段记录温升和电池压降。
-- 没有用户明确要求和硬件安全确认时，不上传、不实跑。
+- 接线 / 改线前断电，USB 与电池都拔。
+- **电机绝不从 Arduino 5 V 或电脑 USB 取电**。
+- MCU、电机驱动、传感器、电池负极必须共地。
+- 上传 / 串口调试时，若无板卡电源路径说明，先关电机电源。
+- 第一次电机测试**轮子离地**，单轮、低 PWM 点动。
+- L9110S-MS 的 1.2 A continuous / 2.0 A peak 是料号上限，不是本 PCB 的散热保证；硬件阶段记录温升和电池压降。
 
 ## 首次校准顺序
 
-1. 只接传感器，确认 EN 有效电平、黑线电平和 A0/A1 左右对应关系。
-2. 只接超声波模块，确认 D13 TRIG、D12 ECHO、5 V/GND 和共地，先用静止障碍物核对 20-400 cm 量程内读数趋势。
-3. 轮子离地，低 PWM 点动左电机和右电机，确认方向。
-4. 默认左轮前进使用 IB、右轮前进使用 IA；根据实测结果调整 `kInvertLeftMotor`、`kInvertRightMotor`、`kLeftForwardUsesIb`、`kRightForwardUsesIb` 和必要时的 `kMotorDriveMode`。
-5. 测最低启动 PWM、低速连续运行温升和电池压降，再决定是否提高 `kMotorMaxPwm` 或启用 `kMotorMinimumEffectivePwm`。
-6. 标定低速原地右转 90° 所需时间，再调整 `kObstacleRightTurnControlTicks`。
-7. 先调 P，再调 D，最后决定是否需要 I；每次调整都记录硬件条件。
+1. **只接传感器**：确认 EN 有效电平、黑线电平、A0 / A1 左右对应。
+2. **只接超声波**：D13 TRIG、D12 ECHO、5 V / GND 共地；静止障碍物核对 20–400 cm 量程内读数趋势。
+3. **轮子离地，低 PWM 单轮点动**：确认方向；必要时调 `kInvert{Left,Right}Motor`、`k{Left,Right}ForwardUsesIb`、`kMotorDriveMode`。
+4. **测最低启动 PWM、温升与电池压降**：
+   - 默认 `kMotorMinimumEffectivePwm = 90` 已开启 → 静止启动时直接跳到该占空比再 ramp，避开 8–90 段死区。
+   - 电机在更低占空比已能起转：降低该值减小启动冲击。
+   - 电机更迟才起转：优先提高基础速度而不是无脑放大 minimum，避免反向制动过冲。
+   - 在 `kBrakeHighSideInversePwm` 模式下，`kMotor*Pwm = 128` ≈ 50% 驱动；`= 255` = 整周期驱动。
+5. **标定低速原地右转 90°**：右转 PWM 默认 140，旧标定必须重做。
+6. **PD 调参**：先调直线 P、再调直线 D；再调弯道 P、D。每次调整都记录电池状态和环境。本项目刻意不使用 I（理由见 ADR-008）。
 
 ## 设计记录
 
 - [技术规范](docs/line-follower-plan-and-spec.md)
-- [ADR-001: 黑线循迹小车首版架构](docs/decisions/ADR-001-line-follower-architecture.md)
-- [ADR-002: 直接寄存器实现 ADC 与 PWM](docs/decisions/ADR-002-direct-register-adc-pwm.md)
-- [ADR-003: 使用 Timer1 作为电机 PWM 与控制 tick 专用时基](docs/decisions/ADR-003-timer1-motor-timebase.md)
-- [ADR-004: 使用 PCINT 和 Timer1 时间戳实现超声波避障](docs/decisions/ADR-004-ultrasonic-obstacle-avoidance.md)
-- [ADR-005: 分层循迹控制与开环 90° 右转避障](docs/decisions/ADR-005-layered-control-and-right-turn-obstacle.md)
-- [ADR-006: 教师兼容的 L9110S 电机驱动模型](docs/decisions/ADR-006-teacher-compatible-motor-drive-model.md)
+- [ADR-001：首版架构](docs/decisions/ADR-001-line-follower-architecture.md)
+- [ADR-002：直接寄存器 ADC 与 PWM](docs/decisions/ADR-002-direct-register-adc-pwm.md)
+- [ADR-003：Timer1 作为电机 PWM 与控制 tick 时基](docs/decisions/ADR-003-timer1-motor-timebase.md)
+- [ADR-004：PCINT + Timer1 时间戳实现超声波避障](docs/decisions/ADR-004-ultrasonic-obstacle-avoidance.md)
+- [ADR-005：分层循迹控制与开环 90° 右转避障](docs/decisions/ADR-005-layered-control-and-right-turn-obstacle.md)
+- [ADR-006：教师兼容的 L9110S 电机驱动模型](docs/decisions/ADR-006-teacher-compatible-motor-drive-model.md)
+- [ADR-007：启动死区跳变与默认 PWM 重新标定](docs/decisions/ADR-007-startup-deadband-and-default-speeds.md)
+- [ADR-008：只用 PD 与启用双白超时](docs/decisions/ADR-008-pd-only-and-mandatory-ambiguous-timeout.md)
+- [ADR-009：RobotController 状态机清理与模块解耦](docs/decisions/ADR-009-state-machine-cleanup.md)
+- [ADR-010：AtomicGuard RAII、LineState enum 与 .cpp-only 工具](docs/decisions/ADR-010-raii-atomic-and-line-state-cleanup.md)
 
 ## 许可证
 

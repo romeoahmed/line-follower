@@ -1,31 +1,9 @@
 #include "MotorDriver.h"
 
 namespace lf {
+namespace {
 
-void MotorDriver::begin() {
-  left_ = {};
-  right_ = {};
-  Timer1MotorPwm::submit(makeDutyFrame());
-}
-
-void MotorDriver::setTargetSpeeds(const int16_t left, const int16_t right) {
-  left_.target = applyCompensation(left, RobotConfig::kLeftMotorTrimPermille);
-  right_.target = applyCompensation(right, RobotConfig::kRightMotorTrimPermille);
-}
-
-void MotorDriver::update() {
-  stepMotor(&left_);
-  stepMotor(&right_);
-  Timer1MotorPwm::submit(makeDutyFrame());
-}
-
-void MotorDriver::stopNow() {
-  left_ = {};
-  right_ = {};
-  Timer1MotorPwm::emergencyStop();
-}
-
-int16_t MotorDriver::clampSignedPwm(const int16_t value) {
+int16_t clampSignedPwm(const int16_t value) {
   if (value > RobotConfig::kMotorMaxPwm) {
     return RobotConfig::kMotorMaxPwm;
   }
@@ -35,93 +13,26 @@ int16_t MotorDriver::clampSignedPwm(const int16_t value) {
   return value;
 }
 
-int16_t MotorDriver::applyCompensation(const int16_t value, const int16_t trimPermille) {
+// trim 千分比：scale = 1 + trim/1000。±500 后整除是 round-half-away-from-zero，
+// 避免 ±1 等极小命令在缩放后被 truncate 成 0。死区跳变只在 rampToward() 做（ADR-009）。
+// 控制器层已先 clamp 一次；这里 trim 后再 clamp 是为了 trim 放大可能再次越限的情况
+// （ADR-010 §7：两层 clamp 守不同域）。
+int16_t applyCompensation(const int16_t value, const int16_t trimPermille) {
   if (value == 0) {
     return 0;
   }
-
-  const int32_t scale = 1000L + trimPermille;
-  int32_t scaled = static_cast<int32_t>(value) * scale;
-  if (scaled >= 0) {
-    scaled += 500;
-  } else {
-    scaled -= 500;
-  }
-
-  const int32_t divided = scaled / 1000L;
-  int16_t compensated = 0;
-  if (divided > RobotConfig::kMotorMaxPwm) {
-    compensated = RobotConfig::kMotorMaxPwm;
-  } else if (divided < -static_cast<int32_t>(RobotConfig::kMotorMaxPwm)) {
-    compensated = -static_cast<int16_t>(RobotConfig::kMotorMaxPwm);
-  } else {
-    compensated = static_cast<int16_t>(divided);
-  }
-  const int16_t minimum = RobotConfig::kMotorMinimumEffectivePwm;
-  if (minimum > 0 && compensated != 0 && magnitude(compensated) < minimum) {
-    compensated = signOf(compensated) * minimum;
-  }
-
-  return clampSignedPwm(compensated);
+  const int32_t scaled = static_cast<int32_t>(value) * (1000L + trimPermille);
+  const int32_t rounded = (scaled >= 0) ? scaled + 500 : scaled - 500;
+  const int32_t divided = rounded / 1000L;
+  return clampSignedPwm(static_cast<int16_t>(divided));
 }
 
-int16_t MotorDriver::rampToward(const int16_t current, const int16_t target) {
-  const int16_t step = RobotConfig::kMotorRampStepPerControlTick;
-  if (current < target) {
-    const int16_t next = current + step;
-    return (next > target) ? target : next;
-  }
-  if (current > target) {
-    const int16_t next = current - step;
-    return (next < target) ? target : next;
-  }
-  return current;
-}
-
-void MotorDriver::stepMotor(MotorState* state) {
-  if (state == nullptr) {
-    return;
-  }
-
-  const int8_t targetSign = signOf(state->target);
-  const int8_t currentSign = signOf(state->current);
-
-  if (state->blankTicks > 0) {
-    // 方向切换后的空档期：IA/IB 都低，避免 L9110S 输入瞬间冲突。
-    state->current = 0;
-    --state->blankTicks;
-    return;
-  }
-
-  if (state->current != 0 && targetSign != 0 && currentSign != targetSign) {
-    // 先按斜率降到 0，再进入空档期，最后才允许反向 PWM。
-    state->current = rampToward(state->current, 0);
-    if (state->current == 0) {
-      state->lastDirection = targetSign;
-      state->blankTicks = RobotConfig::kDirectionBlankControlTicks;
-    }
-    return;
-  }
-
-  if (state->current == 0 && targetSign != 0 && state->lastDirection != 0 &&
-      targetSign != state->lastDirection) {
-    state->lastDirection = targetSign;
-    state->blankTicks = RobotConfig::kDirectionBlankControlTicks;
-    return;
-  }
-
-  state->current = rampToward(state->current, state->target);
-  if (state->current != 0) {
-    state->lastDirection = signOf(state->current);
-  }
-}
-
-uint8_t MotorDriver::magnitude(const int16_t value) {
-  const int16_t positive = (value < 0) ? -value : value;
+uint8_t magnitude(const int16_t value) {
+  const int16_t positive = (value < 0) ? static_cast<int16_t>(-value) : value;
   return static_cast<uint8_t>(positive);
 }
 
-int8_t MotorDriver::signOf(const int16_t value) {
+int8_t signOf(const int16_t value) {
   if (value > 0) {
     return 1;
   }
@@ -131,18 +42,50 @@ int8_t MotorDriver::signOf(const int16_t value) {
   return 0;
 }
 
-void MotorDriver::applySide(const int16_t signedPwm, const bool invert, const bool forwardUsesIb,
-                            uint8_t* iaDuty, uint8_t* ibDuty) {
-  if (iaDuty == nullptr || ibDuty == nullptr) {
-    return;
+int16_t rampToward(const int16_t current, const int16_t target) {
+  const int16_t step = RobotConfig::kMotorRampStepPerControlTick;
+  const int16_t minimum = RobotConfig::kMotorMinimumEffectivePwm;
+
+  if (current == target) {
+    return current;
   }
 
+  if (current < target) {
+    // 静止→正向跨 0：直接跳到 minimum，避免 ramp 头几步停在电机死区。
+    if (current <= 0 && target > 0 && minimum > 0) {
+      const int16_t kicked = (target < minimum) ? target : minimum;
+      if (kicked > current) {
+        return kicked;
+      }
+    }
+    const int16_t next = static_cast<int16_t>(current + step);
+    return (next > target) ? target : next;
+  }
+
+  // 静止→反向跨 0：对称跳到 -minimum。
+  if (current >= 0 && target < 0 && minimum > 0) {
+    const int16_t kicked =
+        (target > static_cast<int16_t>(-minimum)) ? target : static_cast<int16_t>(-minimum);
+    if (kicked < current) {
+      return kicked;
+    }
+  }
+  const int16_t next = static_cast<int16_t>(current - step);
+  return (next < target) ? target : next;
+}
+
+// 一侧电机的 L9110 输入映射：有符号命令 → (iaDuty, ibDuty)。
+// 命令为 0：双输入低（默认滑行停转，ADR-006）。
+// kBrakeHighSideInversePwm：方向输入整周期高，另一输入输出 255-duty 反相 PWM。
+// kCoastLowSidePwm：方向输入按 duty PWM，另一输入低。
+void applySide(const int16_t signedPwm, const bool invert, const bool forwardUsesIb,
+               uint8_t* iaDuty, uint8_t* ibDuty) {
   *iaDuty = 0;
   *ibDuty = 0;
 
   int16_t command = signedPwm;
   if (invert) {
-    command = -command;
+    command = static_cast<int16_t>(-command);
   }
 
   if (command == 0) {
@@ -170,6 +113,66 @@ void MotorDriver::applySide(const int16_t signedPwm, const bool invert, const bo
     *ibDuty = duty;
   } else {
     *iaDuty = duty;
+  }
+}
+
+} // namespace
+
+void MotorDriver::begin() {
+  left_ = {};
+  right_ = {};
+  Timer1MotorPwm::submit(makeDutyFrame());
+}
+
+void MotorDriver::setTargetSpeeds(const int16_t left, const int16_t right) {
+  left_.target = applyCompensation(left, RobotConfig::kLeftMotorTrimPermille);
+  right_.target = applyCompensation(right, RobotConfig::kRightMotorTrimPermille);
+}
+
+void MotorDriver::update() {
+  stepMotor(&left_);
+  stepMotor(&right_);
+  Timer1MotorPwm::submit(makeDutyFrame());
+}
+
+void MotorDriver::stopNow() {
+  left_ = {};
+  right_ = {};
+  Timer1MotorPwm::emergencyStop();
+}
+
+void MotorDriver::stepMotor(MotorState* state) {
+  const int8_t targetSign = signOf(state->target);
+  const int8_t currentSign = signOf(state->current);
+
+  // 方向切换序列分三步：① 当前与目标反号 → ramp 到 0；② 到 0 后开 blank 空档；
+  // ③ blank 倒计时结束才允许反向 PWM。这是为了避免 L9110S 两输入瞬时同高。
+  if (state->blankTicks > 0) {
+    state->current = 0;
+    --state->blankTicks;
+    return;
+  }
+
+  if (state->current != 0 && targetSign != 0 && currentSign != targetSign) {
+    state->current = rampToward(state->current, 0);
+    if (state->current == 0) {
+      state->lastDirection = targetSign;
+      state->blankTicks = RobotConfig::kDirectionBlankControlTicks;
+    }
+    return;
+  }
+
+  // current 已经 0 但 lastDirection 与 target 反号：也需要走一次 blank。
+  if (state->current == 0 && targetSign != 0 && state->lastDirection != 0 &&
+      targetSign != state->lastDirection) {
+    state->lastDirection = targetSign;
+    state->blankTicks = RobotConfig::kDirectionBlankControlTicks;
+    return;
+  }
+
+  state->current = rampToward(state->current, state->target);
+  if (state->current != 0) {
+    state->lastDirection = signOf(state->current);
   }
 }
 

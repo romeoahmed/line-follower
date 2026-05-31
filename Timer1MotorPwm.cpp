@@ -1,5 +1,7 @@
 #include "Timer1MotorPwm.h"
 
+#include "AtomicGuard.h"
+
 #include <avr/interrupt.h>
 
 namespace lf {
@@ -9,9 +11,12 @@ namespace {
 constexpr uint8_t kMotorPortDMask = _BV(Pins::kLeftMotorIbBit) | _BV(Pins::kLeftMotorIaBit);
 constexpr uint8_t kMotorPortBMask = _BV(Pins::kRightMotorIbBit) | _BV(Pins::kRightMotorIaBit);
 constexpr uint8_t kMaxEdges = 4;
+// 1 µs floor on edge tick. duty=0 is handled by a separate skip; this only
+// guards rounding-to-zero of small non-zero duties (L9110 won't resolve a
+// sub-µs pulse).
 constexpr uint16_t kMinimumEdgeTick = 2;
 
-// 一个 PWM 周期最多只有四路下降沿；同 tick 事件会合并，减轻 ISR 工作量。
+// 一个 PWM 周期最多四路下降沿；同 tick 事件合并以缩短 ISR。
 struct EdgeEvent {
   uint16_t tick;
   uint8_t portDLowMask;
@@ -25,6 +30,8 @@ struct PreparedFrame {
   EdgeEvent edges[kMaxEdges];
 };
 
+// active 由 ISR 消费；shadow 由主循环 submit() 填；只在 COMPA 周期边界换帧，
+// 避免主循环写到一半 ISR 触发导致 PWM 撕裂。
 volatile PreparedFrame g_activeFrame = {};
 volatile PreparedFrame g_shadowFrame = {};
 volatile bool g_shadowPending = false;
@@ -33,7 +40,6 @@ volatile uint8_t g_controlPeriodCounter = 0;
 volatile uint8_t g_controlTicksDue = 0;
 volatile uint32_t g_timeBaseTicks = 0;
 
-// active 由 ISR 使用，shadow 由主循环提交；只在周期边界换帧。
 PreparedFrame makeEmptyFrame() {
   PreparedFrame frame = {};
   frame.portDHighMask = 0;
@@ -42,7 +48,9 @@ PreparedFrame makeEmptyFrame() {
   return frame;
 }
 
-void copyFrame(volatile PreparedFrame& destination, const PreparedFrame& source) {
+// 单模板覆盖 volatile→volatile（ISR 换帧）与 const&→volatile（submit）两路源。
+template <typename Source>
+void copyFrame(volatile PreparedFrame& destination, const Source& source) {
   destination.portDHighMask = source.portDHighMask;
   destination.portBHighMask = source.portBHighMask;
   destination.edgeCount = source.edgeCount;
@@ -53,20 +61,9 @@ void copyFrame(volatile PreparedFrame& destination, const PreparedFrame& source)
   }
 }
 
-void copyFrame(volatile PreparedFrame& destination, const volatile PreparedFrame& source) {
-  destination.portDHighMask = source.portDHighMask;
-  destination.portBHighMask = source.portBHighMask;
-  destination.edgeCount = source.edgeCount;
-  for (uint8_t i = 0; i < kMaxEdges; ++i) {
-    destination.edges[i].tick = source.edges[i].tick;
-    destination.edges[i].portDLowMask = source.edges[i].portDLowMask;
-    destination.edges[i].portBLowMask = source.edges[i].portBLowMask;
-  }
-}
-
+// 升序插入：duty 映射与排序在主循环完成，ISR 顺序执行已排好的事件表。
 void insertEdge(PreparedFrame& frame, const uint16_t tick, const uint8_t portDMask,
                 const uint8_t portBMask) {
-  // duty 映射和排序在主循环完成，ISR 只按已排好的事件表执行。
   for (uint8_t i = 0; i < frame.edgeCount; ++i) {
     if (frame.edges[i].tick == tick) {
       frame.edges[i].portDLowMask |= portDMask;
@@ -93,6 +90,9 @@ void insertEdge(PreparedFrame& frame, const uint16_t tick, const uint8_t portDMa
 
 void addChannel(PreparedFrame& frame, const uint8_t duty, const uint8_t portDMask,
                 const uint8_t portBMask) {
+  // duty == 0：完全不进 high mask，也不排边沿（整周期低）。
+  // duty == fullscale：进 high mask，不排边沿（整周期高，没有下降沿可排）。
+  // 中间 duty 才需要在周期内排一个下降沿。
   if (duty == 0) {
     return;
   }
@@ -129,7 +129,9 @@ inline void clearMotorOutputs(const uint8_t portDMask, const uint8_t portBMask) 
 }
 
 void serviceDueEdgesAndScheduleNext() {
-  // COMPA ISR 进入时 TCNT1 已经推进；过期边沿立即清掉，避免小 duty 变成整周期高电平。
+  // ISR 进入时 TCNT1 已经走过 edge.tick；threshold = TCNT1 + 1 表示"这一刻及之前的所有
+  // edge 都应该立刻清掉"——否则一个 duty 极小的输出会被误判为下一周期才该清，结果整周期
+  // 保持高电平。+1 保证 edge.tick == TCNT1 时仍计入"已过期"。
   uint16_t threshold = TCNT1 + 1;
   if (threshold > RobotConfig::kTimer1PwmTop) {
     threshold = RobotConfig::kTimer1PwmTop;
@@ -147,10 +149,13 @@ void serviceDueEdgesAndScheduleNext() {
   clearMotorOutputs(portDLowMask, portBLowMask);
 
   if (g_edgeIndex < g_activeFrame.edgeCount) {
+    // 顺序敏感：先写 OCR1B，再"写 1 清"OCF1B（消除前一轮残留 flag），最后才打开
+    // OCIE1B。任何反序都可能让 COMPB ISR 立刻为陈旧 flag 触发一次。
     OCR1B = g_activeFrame.edges[g_edgeIndex].tick;
     TIFR1 = _BV(OCF1B);
     TIMSK1 |= _BV(OCIE1B);
   } else {
+    // 队列空就关 COMPB ISR——下一次有边沿时 submit() 流程会重新打开。
     TIMSK1 &= static_cast<uint8_t>(~_BV(OCIE1B));
   }
 }
@@ -179,8 +184,7 @@ uint16_t dutyToEdgeTick(const uint8_t duty) {
 void begin() {
   const PreparedFrame emptyFrame = makeEmptyFrame();
 
-  const uint8_t oldSreg = SREG;
-  cli();
+  AtomicGuard guard;
 
   // 启动定时器前先把四个 L9110S 输入设为低电平，默认滑行停转。
   DDRD |= kMotorPortDMask;
@@ -195,6 +199,9 @@ void begin() {
   g_controlTicksDue = 0;
   g_timeBaseTicks = 0;
 
+  // CTC mode 4 (WGM13:0 = 0100)：TCNT1 数到 OCR1A 后清零并触发 COMPA，得到周期
+  // = (OCR1A+1) × 0.5 µs。OCR1B 用于触发周期内的下降沿。先把 TCCR1A/B 清零再
+  // 在最后一行用 CS11=1 装上 prescaler=8 启动时钟——避免半配置态下 TCNT1 走偏。
   TCCR1A = 0;
   TCCR1B = 0;
   TCNT1 = 0;
@@ -202,42 +209,33 @@ void begin() {
   OCR1B = 0;
   TIFR1 = _BV(OCF1A) | _BV(OCF1B) | _BV(TOV1);
   TIMSK1 = _BV(OCIE1A);
-  // 只手写 Timer1：CTC 模式、prescaler=8；Timer0/Timer2 保持 Arduino core 原状。
   TCCR1B = _BV(WGM12) | _BV(CS11);
-
-  SREG = oldSreg;
 }
 
 void submit(const DutyFrame& duty) {
   const PreparedFrame prepared = prepareFrame(duty);
 
-  const uint8_t oldSreg = SREG;
-  cli();
+  AtomicGuard guard;
   copyFrame(g_shadowFrame, prepared);
   g_shadowPending = true;
-  SREG = oldSreg;
 }
 
 void emergencyStop() {
   const PreparedFrame emptyFrame = makeEmptyFrame();
 
-  const uint8_t oldSreg = SREG;
-  cli();
+  AtomicGuard guard;
   TIMSK1 &= static_cast<uint8_t>(~_BV(OCIE1B));
   copyFrame(g_activeFrame, emptyFrame);
   copyFrame(g_shadowFrame, emptyFrame);
   g_shadowPending = false;
   g_edgeIndex = 0;
   clearMotorOutputs(kMotorPortDMask, kMotorPortBMask);
-  SREG = oldSreg;
 }
 
 uint8_t takeControlTicks() {
-  const uint8_t oldSreg = SREG;
-  cli();
+  AtomicGuard guard;
   const uint8_t ticks = g_controlTicksDue;
   g_controlTicksDue = 0;
-  SREG = oldSreg;
   return ticks;
 }
 
@@ -255,17 +253,14 @@ uint32_t captureTimeTicksFromIsr() {
 }
 
 uint32_t captureTimeTicks() {
-  const uint8_t oldSreg = SREG;
-  cli();
-  const uint32_t ticks = captureTimeTicksFromIsr();
-  SREG = oldSreg;
-  return ticks;
+  AtomicGuard guard;
+  return captureTimeTicksFromIsr();
 }
 
 void onPeriodCompareIsr() {
   g_timeBaseTicks += RobotConfig::kPwmPeriodTicks;
 
-  // 周期 ISR 是唯一换帧点，避免主循环提交时撕裂 PWM 输出。
+  // 周期边界是唯一换帧点：保证 active 在整个 PWM 周期内不变。
   if (g_shadowPending) {
     copyFrame(g_activeFrame, g_shadowFrame);
     g_shadowPending = false;

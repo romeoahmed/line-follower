@@ -15,6 +15,13 @@ struct LineSensorSample {
 
 class LineSensors {
  public:
+  // 跨 control tick 的多数表决深度。改值会自动联动 mask / majority；countBits()
+  // 是通用的。仅 LineSensors 内部使用。
+  static constexpr uint8_t kHistoryDepth = 3;
+  static constexpr uint8_t kHistoryMask = (1u << kHistoryDepth) - 1u;
+  static constexpr uint8_t kHistoryMajority = kHistoryDepth / 2 + 1;
+  static_assert(kHistoryDepth >= 1 && kHistoryDepth <= 8, "history 必须 fit in uint8_t。");
+
   void begin();
   LineSensorSample sample();
 

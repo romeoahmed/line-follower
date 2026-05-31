@@ -5,8 +5,17 @@
 
 namespace lf {
 
+// 单例：ECHO 边沿由 PCINT0_vect 捕获，ISR 状态保存在 .cpp 的匿名命名空间里，因此
+// 同一时刻最多能有一个实例存在。begin() 会断言这一点（构造便宜，断言只在初始化时检查
+// 一次，不影响控制路径）。如果将来需要多通道超声波，必须把 ISR 共享状态显式 sharded。
 class UltrasonicRangeSensor {
  public:
+  UltrasonicRangeSensor();
+  ~UltrasonicRangeSensor();
+
+  UltrasonicRangeSensor(const UltrasonicRangeSensor&) = delete;
+  UltrasonicRangeSensor& operator=(const UltrasonicRangeSensor&) = delete;
+
   void begin();
   void poll();
   void restartAfterManeuver();

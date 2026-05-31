@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Accepted; ki retention and ambiguous-timeout default superseded by ADR-008
 
 ## Date
 

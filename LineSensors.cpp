@@ -3,16 +3,12 @@
 namespace lf {
 namespace {
 
-uint8_t countThreeBits(const uint8_t value) {
+// AVR 上比 __builtin_popcount 小：后者会链接一个库函数。kHistoryDepth=3 时这是单字节 ≤7。
+uint8_t countBits(uint8_t value) {
   uint8_t count = 0;
-  if ((value & 0x01) != 0) {
-    ++count;
-  }
-  if ((value & 0x02) != 0) {
-    ++count;
-  }
-  if ((value & 0x04) != 0) {
-    ++count;
+  while (value != 0) {
+    count += (value & 1u);
+    value >>= 1;
   }
   return count;
 }
@@ -36,11 +32,12 @@ LineSensorSample LineSensors::sample() {
   LineSensorSample result =
       (RobotConfig::kSensorMode == SensorMode::kAdc) ? sampleAdc() : sampleDigital();
 
-  if (sampleCount_ < 3) {
+  if (sampleCount_ < kHistoryDepth) {
     ++sampleCount_;
   }
 
-  // 3 样本多数表决只跨控制 tick 过滤毛刺，不在单个 tick 内忙等。
+  // 跨 tick 多数表决，不在单 tick 内忙等。warmup 早返回（sampleCount_ < depth）在
+  // 正常控制流中不会命中——kSensorSettle 已先跑满采样窗口；保留为防御性 fallback。
   result.leftBlack = applyHistory(&leftHistory_, result.leftBlack, sampleCount_);
   result.rightBlack = applyHistory(&rightHistory_, result.rightBlack, sampleCount_);
   return result;
@@ -54,12 +51,11 @@ bool LineSensors::applyHistory(uint8_t* history, const bool black, const uint8_t
   if (history == nullptr) {
     return black;
   }
-
-  *history = static_cast<uint8_t>(((*history << 1) | (black ? 1 : 0)) & 0x07);
-  if (sampleCount < 3) {
+  *history = static_cast<uint8_t>(((*history << 1) | (black ? 1u : 0u)) & kHistoryMask);
+  if (sampleCount < kHistoryDepth) {
     return black;
   }
-  return countThreeBits(*history) >= 2;
+  return countBits(*history) >= kHistoryMajority;
 }
 
 bool LineSensors::adcMeansBlack(const uint16_t value, const bool previousBlack) {
