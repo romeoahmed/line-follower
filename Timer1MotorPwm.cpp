@@ -11,9 +11,8 @@ namespace {
 constexpr uint8_t kMotorPortDMask = _BV(Pins::kLeftMotorIbBit) | _BV(Pins::kLeftMotorIaBit);
 constexpr uint8_t kMotorPortBMask = _BV(Pins::kRightMotorIbBit) | _BV(Pins::kRightMotorIaBit);
 constexpr uint8_t kMaxEdges = 4;
-// 1 µs floor on edge tick. duty=0 is handled by a separate skip; this only
-// guards rounding-to-zero of small non-zero duties (L9110 won't resolve a
-// sub-µs pulse).
+// 边沿 tick 下限 = 1 µs（2 × 0.5 µs）：duty=0 在 addChannel 早跳过，这里只挡极小
+// 非零 duty 被四舍五入到 0；L9110 也分辨不出亚 µs 脉冲。
 constexpr uint16_t kMinimumEdgeTick = 2;
 
 // 一个 PWM 周期最多四路下降沿；同 tick 事件合并以缩短 ISR。
@@ -129,9 +128,8 @@ inline void clearMotorOutputs(const uint8_t portDMask, const uint8_t portBMask) 
 }
 
 void serviceDueEdgesAndScheduleNext() {
-  // ISR 进入时 TCNT1 已经走过 edge.tick；threshold = TCNT1 + 1 表示"这一刻及之前的所有
-  // edge 都应该立刻清掉"——否则一个 duty 极小的输出会被误判为下一周期才该清，结果整周期
-  // 保持高电平。+1 保证 edge.tick == TCNT1 时仍计入"已过期"。
+  // +1 保证 edge.tick == TCNT1 时仍算"已过期"立即清掉；否则极小 duty 会被推到下一
+  // 周期，整周期保持高电平。
   uint16_t threshold = TCNT1 + 1;
   if (threshold > RobotConfig::kTimer1PwmTop) {
     threshold = RobotConfig::kTimer1PwmTop;
@@ -199,9 +197,8 @@ void begin() {
   g_controlTicksDue = 0;
   g_timeBaseTicks = 0;
 
-  // CTC mode 4 (WGM13:0 = 0100)：TCNT1 数到 OCR1A 后清零并触发 COMPA，得到周期
-  // = (OCR1A+1) × 0.5 µs。OCR1B 用于触发周期内的下降沿。先把 TCCR1A/B 清零再
-  // 在最后一行用 CS11=1 装上 prescaler=8 启动时钟——避免半配置态下 TCNT1 走偏。
+  // CTC mode 4 (WGM12=1)：TCNT1→OCR1A 清零并触发 COMPA，周期 (OCR1A+1)×0.5 µs。
+  // 最后一行 CS11 装 prescaler=8 启动时钟，避免半配置态下 TCNT1 走偏。
   TCCR1A = 0;
   TCCR1B = 0;
   TCNT1 = 0;
@@ -243,8 +240,8 @@ uint32_t captureTimeTicksFromIsr() {
   uint32_t base = g_timeBaseTicks;
   const uint16_t counter = TCNT1;
 
-  // If COMPA is pending while interrupts are masked, CTC may already have wrapped
-  // TCNT1 before onPeriodCompareIsr() advances the software epoch.
+  // 关中断窗口内 COMPA 可能已 pending：CTC 已 wrap TCNT1，但 onPeriodCompareIsr()
+  // 还没推进软件时基——手动补一个周期，避免时间戳回退。
   if ((TIFR1 & _BV(OCF1A)) != 0 && counter < RobotConfig::kTimer1PwmTop) {
     base += RobotConfig::kPwmPeriodTicks;
   }

@@ -37,9 +37,17 @@ The control story:
   See ADR-008.
 - `RobotController` is a small state machine: `SensorSettle → FollowLine →
   {LineLost|ObstacleStop → ObstacleTurnRight} → SensorSettle`, plus a `Stopped`
-  terminal. All state writes go through a single `transitionTo()` to keep
-  entry side effects in one place; a single `stateTicks_` is shared across
-  states (only one is active at a time). See ADR-009.
+  terminal and a `Fault` failsafe entered on boot when `MCUSR.WDRF` was set.
+  All state writes go through a single `transitionTo()` to keep entry side
+  effects in one place; a single `stateTicks_` is shared across states (only
+  one is active at a time). The follow-line PWM mix uses differential-preserving
+  saturation (`mixSaturate` in `RobotController.cpp`), so a saturating PD
+  command keeps its full L/R differential and the base speed gives way instead.
+  See ADR-009 (state shape) and ADR-011 (watchdog/failsafe + saturation).
+- `BootStatus` captures `MCUSR` in an `.init3` hook before `main()` and disables
+  the watchdog, per the avr-libc canonical pattern. `RobotController::begin()`
+  consults `lastResetWasWatchdog()` to decide between arming WDT and parking
+  in `kFault`. See ADR-011.
 
 ## Read First
 
@@ -57,6 +65,7 @@ Before changing code, read:
 - `docs/decisions/ADR-008-pd-only-and-mandatory-ambiguous-timeout.md`
 - `docs/decisions/ADR-009-state-machine-cleanup.md`
 - `docs/decisions/ADR-010-raii-atomic-and-line-state-cleanup.md`
+- `docs/decisions/ADR-011-watchdog-fault-state-and-saturation-mix.md`
 
 The ADRs define hard boundaries. Do not weaken them casually to make an
 implementation easier — open an ADR follow-up instead.
@@ -102,18 +111,20 @@ implementation easier — open an ADR follow-up instead.
 |---|---|
 | `line-follower.ino` | Sketch entry; constructs a `RobotController` and pumps `poll()` |
 | `BoardProfile.h` | Compile-time guard for ATmega328P / 16 MHz / UNO pin map |
+| `BootStatus.*` | `.init3` `MCUSR` capture + early `wdt_disable()`; exposes reset cause to `RobotController` (ADR-011) |
+| `MathUtils.h` | Header-only `constexpr` `clampSigned` / `maxOf` / `minOf` shared across modules |
 | `Pins.h` | Functional names → Arduino pin → AVR port bit → ADC channel |
 | `RobotConfig.h` | All tunable constants; PID profile structs; `static_assert`s |
 | `AtomicGuard.h` | Header-only RAII wrapper around SREG save + `cli()` + restore (ADR-010) |
 | `FastIo.h` | Header-only sensor EN/OUT port operations |
 | `AdcDriver.*` | Direct `ADMUX`/`ADCSRA` access for ADC0/ADC1 with timeout guard |
 | `Timer1MotorPwm.*` | Timer1 CTC setup, four-channel software PWM, control tick, 0.5 µs timestamp |
-| `MotorDriver.*` | Signed speed in, clamp, trim, ramp with startup-deadband kick, direction blanking, drive-mode-aware duty mapping |
+| `MotorDriver.*` | Signed speed in, trim with clamp, ramp with startup-deadband kick, direction blanking, drive-mode-aware duty mapping |
 | `LineSensors.*` | Digital or ADC sampling, polarity, three-sample majority filter |
 | `LineEstimator.*` | Two-sensor booleans → `LineState` enum (six mutually-exclusive states) + discrete error |
 | `PdController.*` | Integer Q8 PD (no I) with caller-supplied gains and clamp |
 | `UltrasonicRangeSensor.*` | Non-blocking TRIG state machine, PCINT0 ECHO capture, distance + obstacle latch |
-| `RobotController.*` | State machine with single `transitionTo()`, 10 ms control loop, profile selection, lost-line search, obstacle stop + open-loop right turn |
+| `RobotController.*` | State machine with single `transitionTo()`, 10 ms control loop, profile selection, lost-line search, obstacle stop + open-loop right turn, watchdog + `kFault`, differential-preserving `mixSaturate` |
 
 Keep hardware register writes in the existing low-level modules. Control
 logic does not directly manipulate AVR registers.
@@ -162,6 +173,21 @@ logic does not directly manipulate AVR registers.
 - **`UltrasonicRangeSensor` is a singleton by construction.** PCINT0 ISR state
   is shared file-scope globals; `begin()` traps if a second instance ever
   exists. Don't try to instantiate two.
+- **`wdt_reset()` lives in `poll()` after `takeControlTicks()` returns > 0.** A
+  watchdog kick at the top of `loop()` would mask the worst failure mode: main
+  loop alive but Timer1 COMPA ISR dead. Only tick-gated kicks expose it. See
+  ADR-011 §1.
+- **`mixSaturate` (control layer) and `MotorDriver::applyCompensation`'s
+  internal clamp guard different domains.** `mixSaturate` enforces the
+  ±`kMotorMaxPwm` envelope while preserving L/R differential; the clamp inside
+  `applyCompensation` catches the case where trim multiplication pushes a
+  per-side command back over the envelope. Do not collapse them.
+- **`kFault` is entered on boot when the previous reset was a watchdog reset,
+  and stays there.** The MCU is alive (LED blinks, `loop()` runs) but the
+  control path early-returns and motors are stopped; watchdog is disabled to
+  prevent silent reboot cycles. This is how a hardware debugger distinguishes
+  "firmware crashed and rebooted" from "firmware ran normally then chose to
+  stop" (`kStopped`).
 
 ## Commands
 

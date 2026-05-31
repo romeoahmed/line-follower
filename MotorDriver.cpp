@@ -1,22 +1,15 @@
 #include "MotorDriver.h"
 
+#include "MathUtils.h"
+
 namespace lf {
 namespace {
 
-int16_t clampSignedPwm(const int16_t value) {
-  if (value > RobotConfig::kMotorMaxPwm) {
-    return RobotConfig::kMotorMaxPwm;
-  }
-  if (value < -static_cast<int16_t>(RobotConfig::kMotorMaxPwm)) {
-    return -static_cast<int16_t>(RobotConfig::kMotorMaxPwm);
-  }
-  return value;
-}
+constexpr int16_t kMotorMaxPwmSigned = static_cast<int16_t>(RobotConfig::kMotorMaxPwm);
 
-// trim 千分比：scale = 1 + trim/1000。±500 后整除是 round-half-away-from-zero，
-// 避免 ±1 等极小命令在缩放后被 truncate 成 0。死区跳变只在 rampToward() 做（ADR-009）。
-// 控制器层已先 clamp 一次；这里 trim 后再 clamp 是为了 trim 放大可能再次越限的情况
-// （ADR-010 §7：两层 clamp 守不同域）。
+// trim 千分比：scale = 1 + trim/1000；±500 后整除做 round-half-away-from-zero，
+// 避免 ±1 极小命令被 truncate 成 0。这里的 clamp 挡 trim 放大后越限（如 +50%
+// 下 200→300）；不与控制层 mixSaturate 冗余——守不同域（ADR-011 §3）。
 int16_t applyCompensation(const int16_t value, const int16_t trimPermille) {
   if (value == 0) {
     return 0;
@@ -24,7 +17,7 @@ int16_t applyCompensation(const int16_t value, const int16_t trimPermille) {
   const int32_t scaled = static_cast<int32_t>(value) * (1000L + trimPermille);
   const int32_t rounded = (scaled >= 0) ? scaled + 500 : scaled - 500;
   const int32_t divided = rounded / 1000L;
-  return clampSignedPwm(static_cast<int16_t>(divided));
+  return clampSigned<int16_t>(static_cast<int16_t>(divided), kMotorMaxPwmSigned);
 }
 
 uint8_t magnitude(const int16_t value) {

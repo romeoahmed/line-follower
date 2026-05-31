@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Accepted; §7 saturation policy superseded by ADR-011 (mixSaturate 差分保持饱和)
 
 ## Date
 

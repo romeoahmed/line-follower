@@ -1,5 +1,10 @@
 #include "RobotController.h"
 
+#include "BootStatus.h"
+#include "MathUtils.h"
+
+#include <avr/wdt.h>
+
 namespace lf {
 namespace {
 
@@ -9,6 +14,8 @@ struct FollowProfile {
   PdGainsQ8 gains;
   bool usePd;
 };
+
+constexpr int16_t kMotorMaxSigned = static_cast<int16_t>(RobotConfig::kMotorMaxPwm);
 
 // 选 profile：基于 LineState 穷举；error 只在确定要给 PD 时用到。
 // 交叉/双白都不更新 PD（偏差信息不可信，让 PD 介入只会引入噪声），按低风险直行。
@@ -33,12 +40,12 @@ FollowProfile profileForEstimate(const LineEstimate& estimate, const int16_t las
                          RobotConfig::kPdStraightGainsQ8, true};
   }
   case LineState::kCentered:
-    // kOnLine 模式下双黑居中：error 已经是 0，按直线 profile 跑 PD 等价于"无修正直行"。
+    // kOnLine 模式下双黑居中：error = 0，按直线 profile 跑 PD 等价于"无修正直行"。
     return FollowProfile{RobotConfig::kMotorStraightPwm, RobotConfig::kPdStraightMaxCorrection,
                          RobotConfig::kPdStraightGainsQ8, true};
   case LineState::kInvalid:
-    // runFollowLine 在调用 profileForEstimate 前已经把 kInvalid 路到 kLineLost，
-    // 不会进到这里；返回 cautious 直行作为最低风险 fallback。
+    // runFollowLine 在调用前已经把 kInvalid 路到 kLineLost，不会进到这里；
+    // 返回 cautious 直行作为最低风险 fallback。
     return FollowProfile{RobotConfig::kMotorCautiousPwm, 0, RobotConfig::kPdStraightGainsQ8, false};
   }
   return FollowProfile{RobotConfig::kMotorCautiousPwm, 0, RobotConfig::kPdStraightGainsQ8, false};
@@ -48,6 +55,30 @@ FollowProfile profileForEstimate(const LineEstimate& estimate, const int16_t las
 bool ambiguousCenterTimedOut(const uint16_t ticks, const int16_t lastError) {
   return RobotConfig::kAmbiguousCenterLimitTicks > 0 && lastError != 0 &&
          ticks > RobotConfig::kAmbiguousCenterLimitTicks;
+}
+
+struct LeftRightCommand {
+  int16_t left;
+  int16_t right;
+};
+
+// 差分保持饱和：越过 ±kMotorMaxPwm 时双边同步偏移把命令拉回，L/R 差分守恒、
+// 基速被动让步。物理论证与数值表见 ADR-011 §3。最后一行硬 clamp 兜底
+// |correction| > 2*kMotorMaxPwm 的退化情形。
+LeftRightCommand mixSaturate(const int16_t base, const int16_t correction) {
+  int16_t left = static_cast<int16_t>(base + correction);
+  int16_t right = static_cast<int16_t>(base - correction);
+
+  const int16_t over = maxOf<int16_t>(maxOf(left, right) - kMotorMaxSigned, 0);
+  left = static_cast<int16_t>(left - over);
+  right = static_cast<int16_t>(right - over);
+
+  const int16_t under = maxOf<int16_t>(-kMotorMaxSigned - minOf(left, right), 0);
+  left = static_cast<int16_t>(left + under);
+  right = static_cast<int16_t>(right + under);
+
+  return LeftRightCommand{clampSigned<int16_t>(left, kMotorMaxSigned),
+                          clampSigned<int16_t>(right, kMotorMaxSigned)};
 }
 
 } // namespace
@@ -61,11 +92,26 @@ void RobotController::begin() {
 
   lastError_ = 0;
   missedControlTicks_ = 0;
-  state_ = RobotState::kSensorSettle;
   stateTicks_ = 0;
+
+  // WDRF：上一帧固件失活过，永久停 kFault 而不是无声重启循环冲出去（ADR-011 §1）。
+  if (BootStatus::lastResetWasWatchdog()) {
+    wdt_disable();
+    state_ = RobotState::kFault;
+    motors_.stopNow();
+    return;
+  }
+
+  state_ = RobotState::kSensorSettle;
+  // 12 × 控制 tick：吸收一次性抖动，持续饥饿 120 ms 内强复位。
+  wdt_enable(WDTO_120MS);
 }
 
 void RobotController::poll() {
+  if (state_ == RobotState::kFault) {
+    return;
+  }
+
   // 超声波 TRIG/ECHO 非阻塞状态机在主循环高频轮询，独立于控制 tick。
   ultrasonic_.poll();
 
@@ -73,6 +119,10 @@ void RobotController::poll() {
   if (ticks == 0) {
     return;
   }
+
+  // tick-gated 喂狗：抓"loop 活但 Timer1 COMPA ISR 死"——顶部喂会掩盖（ADR-011 §1）。
+  wdt_reset();
+
   if (ticks > 1) {
     // 诊断计数器，0xFFFF 饱和（wrap 会让长时间运行后数值回小，掩盖实时性问题）。
     const uint16_t add = static_cast<uint16_t>(ticks - 1);
@@ -84,8 +134,8 @@ void RobotController::poll() {
 }
 
 void RobotController::runControlStep() {
-  // 终态：永久停车，不再消耗控制循环。
-  if (state_ == RobotState::kStopped) {
+  // 终态/故障态：永久停车，不再消耗控制循环。
+  if (state_ == RobotState::kStopped || state_ == RobotState::kFault) {
     return;
   }
 
@@ -105,7 +155,7 @@ void RobotController::runControlStep() {
     return;
   }
 
-  // Settle 不需要读传感器值，只等待计数器到点。单独走，避免无意义的 sensors_.sample()。
+  // Settle 阶段：跑采样让 majority filter 预热满窗口，但忽略其值，等计数器到点。
   if (state_ == RobotState::kSensorSettle) {
     sensors_.sample();
     motors_.setTargetSpeeds(0, 0);
@@ -132,8 +182,9 @@ void RobotController::runControlStep() {
   case RobotState::kObstacleStop:
   case RobotState::kObstacleTurnRight:
   case RobotState::kStopped:
-    // 上面已经穷举处理；落到这里说明状态机路径出错——按最低风险停车便于硬件排查。
-    transitionTo(RobotState::kStopped);
+  case RobotState::kFault:
+    // 不可达路径兜底：转 kFault 永久停车。
+    transitionTo(RobotState::kFault);
     return;
   }
   // 无 default：新增枚举值时编译器会给出未处理警告。
@@ -145,9 +196,8 @@ void RobotController::runFollowLine(const LineEstimate& estimate) {
     return;
   }
 
-  // 在 kFollowLine 内 stateTicks_ 的语义是"连续 ambiguous 的 tick 数"：每次拿到明确
-  // 偏差就清零；连续双白超过 kAmbiguousCenterLimitTicks 则进入失线。这是单一状态内的
-  // 子计时器，不需要单独字段。
+  // kFollowLine 内 stateTicks_ 的语义是"连续 ambiguous 的 tick 数"：每次拿到明确
+  // 偏差就清零；连续双白超过 kAmbiguousCenterLimitTicks 则进入失线。
   if (estimate.isAmbiguous()) {
     if (stateTicks_ < 0xFFFF) {
       ++stateTicks_;
@@ -166,21 +216,24 @@ void RobotController::runFollowLine(const LineEstimate& estimate) {
   }
 
   const FollowProfile profile = profileForEstimate(estimate, lastError_);
-  const int16_t correction =
-      profile.usePd ? pd_.update(estimate.error, profile.gains, profile.maxCorrection) : 0;
-  const int16_t base = profile.basePwm;
-  // trim 之前在控制层 clamp 是物理正确的：保证饱和时 trim 在物理域内做差分补偿，
-  // 不被 MotorDriver 内层 clamp 抹平。详见 ADR-010 §7。
-  const int16_t left = clampMotorCommand(static_cast<int16_t>(base + correction));
-  const int16_t right = clampMotorCommand(static_cast<int16_t>(base - correction));
 
-  motors_.setTargetSpeeds(left, right);
+  // 跳过 update 时显式 reset：保证 previousError_ 永远只对应"前一次有效 update"，
+  // 下次恢复 PD 时 derivative 从 0 起，避免跨 N 帧的 D 项冲击。
+  int16_t correction = 0;
+  if (profile.usePd) {
+    correction = pd_.update(estimate.error, profile.gains, profile.maxCorrection);
+  } else {
+    pd_.reset();
+  }
+
+  const LeftRightCommand cmd = mixSaturate(static_cast<int16_t>(profile.basePwm), correction);
+  motors_.setTargetSpeeds(cmd.left, cmd.right);
   motors_.update();
 }
 
 void RobotController::runLineLost(const LineEstimate& estimate) {
-  // 回到任何带方向信息（含 kIntersection）的状态就视为找回线了，先进 kFollowLine 再
-  // 立即让 follow 处理这一帧；只有 kAmbiguous 与 kInvalid 维持搜索/停车。
+  // 回到任何带方向信息（含 kIntersection）的状态就视为找回线了，先进 kFollowLine
+  // 再立即让 follow 处理这一帧；只有 kAmbiguous 与 kInvalid 维持搜索/停车。
   if (!estimate.isLost() && !estimate.isAmbiguous()) {
     lastError_ = estimate.error;
     transitionTo(RobotState::kFollowLine);
@@ -245,25 +298,18 @@ void RobotController::transitionTo(const RobotState newState) {
   case RobotState::kStopped:
     motors_.stopNow();
     return;
+  case RobotState::kFault:
+    // 关 WDT 防止无声重启循环；MCU 仍跑 loop()，便于硬件调试。
+    wdt_disable();
+    motors_.stopNow();
+    return;
   case RobotState::kObstacleTurnRight:
     ultrasonic_.restartAfterManeuver();
     return;
   case RobotState::kFollowLine:
   case RobotState::kLineLost:
-    // 这两个状态在 transition 时不需要副作用：lastError_ 是跨态短期记忆；电机由
-    // 后续 run*() 立即写新命令；PD 已经被开头的 reset() 清掉。
     return;
   }
-}
-
-int16_t RobotController::clampMotorCommand(const int16_t value) {
-  if (value > RobotConfig::kMotorMaxPwm) {
-    return RobotConfig::kMotorMaxPwm;
-  }
-  if (value < -static_cast<int16_t>(RobotConfig::kMotorMaxPwm)) {
-    return -static_cast<int16_t>(RobotConfig::kMotorMaxPwm);
-  }
-  return value;
 }
 
 } // namespace lf

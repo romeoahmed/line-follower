@@ -151,35 +151,25 @@ UltrasonicRangeSensor::~UltrasonicRangeSensor() {
 }
 
 void UltrasonicRangeSensor::begin() {
-  // PCINT0 ISR 状态在文件全局 g_* 中——多实例会互相踩。检查放在 begin() 而不是
-  // 构造里：全局对象构造顺序不可控；进 begin() 时 setup() 已完，cli + 死循环
-  // 能让硬件调试者立刻发现。
+  // 单例检查放在 begin()——全局对象构造顺序不可控；这里 setup() 已完，cli+死循环
+  // 让硬件调试一眼可见。PCINT0 ISR 状态在文件全局 g_*，多实例会互踩。
   if (g_instanceCount != 1) {
     cli();
     while (true) {
     }
   }
   beginUltrasonicPinsAndInterrupt();
-
-  // 把"上次 trigger"故意倒推一个完整间隔，让 startMeasurementIfDue() 在首次
-  // poll() 时就立刻发起测量，而不是空等一个间隔后才动。
-  const uint32_t nowTicks = Timer1MotorPwm::captureTimeTicks();
-  lastTriggerTicks_ = nowTicks - RobotConfig::kUltrasonicMeasurementIntervalTimerTicks;
-  triggerEndTicks_ = 0;
-  triggerHigh_ = false;
-  hasDistance_ = false;
-  obstaclePresent_ = false;
-  distanceMillimeters_ = 0;
-  echoMicroseconds_ = 0;
-  obstacleSamples_ = 0;
-  clearSamples_ = RobotConfig::kObstacleClearSamples;
+  resetState();
 }
 
 void UltrasonicRangeSensor::restartAfterManeuver() {
   writeTriggerHigh(false);
   cancelEchoCapture();
+  resetState();
+}
 
-  // 同 begin()：倒推一个间隔，避障机动结束后立刻重新开始测距。
+void UltrasonicRangeSensor::resetState() {
+  // 倒推一个完整间隔，让首次 poll() 立刻发起测量而不空等。
   const uint32_t nowTicks = Timer1MotorPwm::captureTimeTicks();
   lastTriggerTicks_ = nowTicks - RobotConfig::kUltrasonicMeasurementIntervalTimerTicks;
   triggerEndTicks_ = 0;

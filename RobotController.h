@@ -7,8 +7,8 @@
 
 namespace lf {
 
-// 状态机：kSensorSettle 是初始态；kStopped 是终态。状态互斥，共享一个
-// stateTicks_ 计数器；所有转换走 transitionTo() 集中处理副作用。详见 ADR-009。
+// 互斥状态；共享一个 stateTicks_ 计数器；所有写入走 transitionTo()。详见 ADR-009。
+// kFault：boot 时 MCUSR.WDRF 触发，永久停车并关 WDT（ADR-011 §1）。
 enum class RobotState : uint8_t {
   kSensorSettle = 0,
   kFollowLine,
@@ -16,6 +16,7 @@ enum class RobotState : uint8_t {
   kObstacleStop,
   kObstacleTurnRight,
   kStopped,
+  kFault,
 };
 
 class RobotController {
@@ -52,8 +53,6 @@ class RobotController {
 
   // 唯一允许写 state_ 的入口；集中所有"进入新状态"的副作用。
   void transitionTo(RobotState newState);
-
-  static int16_t clampMotorCommand(int16_t value);
 };
 
 } // namespace lf

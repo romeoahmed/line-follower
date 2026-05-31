@@ -10,7 +10,8 @@
 - **PWM 与控制 tick**：Timer1 CTC 软件 PWM @ 4 kHz；每 40 个 PWM 周期一次 10 ms 控制 tick。Timer0 / Timer2 完全不动。
 - **循迹**：A0 / A1 双数字传感器，D2 / A5 控 EN；3 样本多数表决；保留 ADC 模式备用。
 - **避障**：D13 TRIG、D12 ECHO（通过 ATmega328P PCINT4 捕获，非阻塞）；连续 2 帧 ≤ 200 mm 进入停车，再开环右转。
-- **控制算法**：整数 Q8 **PD**（无 I——见 ADR-008），按 `{直线 / 弯道 / 保守 / 寻线}` profile 切换增益与限幅；失线后按最后误差低速搜索，超时停车。
+- **控制算法**：整数 Q8 **PD**（无 I——见 ADR-008），按 `{直线 / 弯道 / 保守 / 寻线}` profile 切换增益与限幅；饱和时差分保持混控（ADR-011），整车被动降速过弯而不吃 PD 命令；失线后按最后误差低速搜索，超时停车。
+- **失活保护**：120 ms watchdog + `.init3` 段 MCUSR 捕获；上一帧固件失活（ISR 死循环、UB）即永久进 `kFault`，关 WDT、电机断电（ADR-011）。
 
 ## 编译
 
@@ -26,6 +27,8 @@ arduino-cli compile --fqbn arduino:avr:uno --warnings all .
 |---|---|
 | `line-follower.ino` | Sketch 入口；构造 `RobotController` 并轮询 `poll()`。 |
 | `BoardProfile.h` | 编译期断言：ATmega328P、16 MHz、UNO standard variant。 |
+| `BootStatus.*` | `.init3` 段捕获 MCUSR 镜像并 `wdt_disable()`；暴露复位原因给控制层（ADR-011）。 |
+| `MathUtils.h` | `constexpr` 共享数学工具：`clampSigned`、`maxOf`、`minOf`。 |
 | `AtomicGuard.h` | RAII：SREG save + `cli()` + restore；ISR 临界区只能通过它进入。 |
 | `Pins.h` | 接线事实源：功能名 → Arduino 引脚 → AVR 端口位 → ADC 通道。 |
 | `RobotConfig.h` | 所有可调参数：Timer1、PWM、分层速度、PID profile、传感器/电机极性、失线、避障。 |
@@ -37,7 +40,7 @@ arduino-cli compile --fqbn arduino:avr:uno --warnings all .
 | `LineEstimator.*` | 双传感器布尔值 → `LineState` enum（互斥的 6 态）+ 离散误差。 |
 | `PdController.*` | 整数 Q8 PD（只有 P + D，没有 I）；调用方传入 profile 增益与限幅。 |
 | `UltrasonicRangeSensor.*` | 非阻塞 TRIG 状态机、PCINT0 ECHO 捕获、距离换算、避障 latch。 |
-| `RobotController.*` | 主状态机；10 ms 控制循环；分层循迹；失线搜索；避障停车与开环右转。 |
+| `RobotController.*` | 主状态机；10 ms 控制循环；分层循迹；失线搜索；避障停车与开环右转；差分保持饱和混控；watchdog + kFault 永久停车（ADR-011）。 |
 | `docs/line-follower-plan-and-spec.md` | 详细规范、接线、验证策略、开放问题。 |
 | `docs/decisions/` | 架构决策记录（ADR-001 至 ADR-010）。 |
 
@@ -106,7 +109,7 @@ ObstacleStop（短暂停车）
 
 调参从 `RobotConfig.h` 开始：
 
-- **电机**：`kMotorDriveMode`、`kMotor{Straight,Curve,Cautious,Search}Pwm`、`kMotorMaxPwm`、`kMotorRampStepPerControlTick`、`kMotorMinimumEffectivePwm`、`k{Left,Right}MotorTrimPermille`。**`kMotorMaxPwm` clamp 在 trim 之前应用**：trim 在物理域内做左右差分补偿，饱和时仍生效；不要把控制层 clamp 移到 trim 之后（见 ADR-010 §7 的物理论证）。
+- **电机**：`kMotorDriveMode`、`kMotor{Straight,Curve,Cautious,Search}Pwm`、`kMotorMaxPwm`、`kMotorRampStepPerControlTick`、`kMotorMinimumEffectivePwm`、`k{Left,Right}MotorTrimPermille`。控制层 `mixSaturate` 在 PWM 域差分保持地把命令压回 ±`kMotorMaxPwm`（ADR-011 §3）；trim 在 `MotorDriver` 内做左右差分补偿，保留独立的二次 clamp 守 trim 放大后的越限。
 - **方向**：`kInvert{Left,Right}Motor`、`k{Left,Right}ForwardUsesIb`。
 - **传感器**：`kSensorMode`、`kSensorEnableActiveLevel`、`kSensorBlackLevel`、`kCenterMode`、`kAdcBlackThreshold`、`kAdcHysteresis`、`kSensorSettleControlTicks`。
 - **PD**：`kPdStraightGainsQ8`、`kPdCurveGainsQ8`、`kPdStraightMaxCorrection`、`kPdCurveMaxCorrection`、`kLineCurveErrorThreshold`。
@@ -150,6 +153,7 @@ ObstacleStop（短暂停车）
 - [ADR-008：只用 PD 与启用双白超时](docs/decisions/ADR-008-pd-only-and-mandatory-ambiguous-timeout.md)
 - [ADR-009：RobotController 状态机清理与模块解耦](docs/decisions/ADR-009-state-machine-cleanup.md)
 - [ADR-010：AtomicGuard RAII、LineState enum 与 .cpp-only 工具](docs/decisions/ADR-010-raii-atomic-and-line-state-cleanup.md)
+- [ADR-011：Watchdog、kFault、差分保持饱和混控、共享数学工具](docs/decisions/ADR-011-watchdog-fault-state-and-saturation-mix.md)
 
 ## 许可证
 

@@ -551,6 +551,11 @@ Always：
 - 超声波 Echo 捕获只用 PCINT 和 Timer1 时间戳，不新增 timer。
 - 避障 90° 是开环标定动作，不得写成“无需硬件校准的精确角度”。
 - 硬件未知项配置化。
+- Watchdog 在正常路径开启（120 ms）；boot 路径检测到上一次复位由 WDT 触发即
+  永久进 `kFault`，关 WDT、电机断电。`wdt_reset()` 只在控制 tick 推进时调用，
+  让 Timer1 COMPA ISR 静默失效也能被抓住（见 ADR-011）。
+- 控制层 PWM 混控用差分保持饱和（`mixSaturate`）：饱和时差分守恒，整车被动
+  降速过弯，PD 命令不被吃。`MotorDriver` 内 trim 后的 clamp 保留，守不同域。
 
 Ask first：
 

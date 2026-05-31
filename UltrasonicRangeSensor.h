@@ -47,6 +47,7 @@ class UltrasonicRangeSensor {
   uint8_t obstacleSamples_ = 0;
   uint8_t clearSamples_ = 0;
 
+  void resetState();
   void startTrigger(uint32_t nowTicks);
   void finishTriggerIfDue(uint32_t nowTicks);
   void startMeasurementIfDue(uint32_t nowTicks);
