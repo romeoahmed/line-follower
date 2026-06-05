@@ -13,6 +13,11 @@ portable Arduino example. Cross-board portability is not a goal — code may, an
 should, lean on the standard UNO pin map, the ArduinoCore-avr defaults for
 Timer0/Timer2, and the exact wiring captured in `Pins.h`.
 
+Top-level behavior (ADR-012): the car cruises straight by default. When any
+line sensor sees black for `kEncounterConfirmTicks` consecutive control ticks,
+it executes an open-loop calibrated left turn, then resumes straight. The
+ultrasonic obstacle path stays intact and outranks the encounter trigger.
+
 The control story:
 
 - `Timer1MotorPwm` runs Timer1 in CTC mode at 4 kHz, generates a four-channel
@@ -30,20 +35,15 @@ The control story:
   scattered bool flags. See ADR-010.
 - `UltrasonicRangeSensor` non-blockingly drives D13 TRIG and captures D12 ECHO
   via `PCINT0_vect`, timestamping with the Timer1 timebase. No `pulseIn()`.
-- `PdController` is integer Q8 — gains and output limits are passed in per
-  call so `RobotController` can switch profiles (straight / curve / cautious /
-  search) without mutating a global controller. There is no I term: discrete
-  ±error has no use for it, and steady-state bias is handled by motor trim.
-  See ADR-008.
-- `RobotController` is a small state machine: `SensorSettle → FollowLine →
-  {LineLost|ObstacleStop → ObstacleTurnRight} → SensorSettle`, plus a `Stopped`
-  terminal and a `Fault` failsafe entered on boot when `MCUSR.WDRF` was set.
-  All state writes go through a single `transitionTo()` to keep entry side
-  effects in one place; a single `stateTicks_` is shared across states (only
-  one is active at a time). The follow-line PWM mix uses differential-preserving
-  saturation (`mixSaturate` in `RobotController.cpp`), so a saturating PD
-  command keeps its full L/R differential and the base speed gives way instead.
-  See ADR-009 (state shape) and ADR-011 (watchdog/failsafe + saturation).
+- `RobotController` is a small state machine: `SensorSettle → GoStraight →
+  {EncounterTurnLeft | ObstacleStop → AvoidanceTurnRight} → SensorSettle`,
+  plus a `Stopped` terminal and a `Fault` failsafe entered on boot when
+  `MCUSR.WDRF` was set. All state writes go through a single `transitionTo()`
+  to keep entry side effects in one place; a single `stateTicks_` is shared
+  across states (only one is active at a time). Both turns are open-loop on
+  calibrated tick counts and cannot be interrupted once started. See
+  ADR-009 (state-machine shape), ADR-011 (watchdog / failsafe), and
+  ADR-012 (current behavior set and the PD removal).
 - `BootStatus` captures `MCUSR` in an `.init3` hook before `main()` and disables
   the watchdog, per the avr-libc canonical pattern. `RobotController::begin()`
   consults `lastResetWasWatchdog()` to decide between arming WDT and parking
@@ -66,9 +66,11 @@ Before changing code, read:
 - `docs/decisions/ADR-009-state-machine-cleanup.md`
 - `docs/decisions/ADR-010-raii-atomic-and-line-state-cleanup.md`
 - `docs/decisions/ADR-011-watchdog-fault-state-and-saturation-mix.md`
+- `docs/decisions/ADR-012-encounter-turn-left-and-pd-removal.md`
 
 The ADRs define hard boundaries. Do not weaken them casually to make an
-implementation easier — open an ADR follow-up instead.
+implementation easier — open an ADR follow-up instead. Status lines on the
+older ADRs flag which sections ADR-012 supersedes.
 
 ## Hard Constraints
 
@@ -114,7 +116,7 @@ implementation easier — open an ADR follow-up instead.
 | `BootStatus.*` | `.init3` `MCUSR` capture + early `wdt_disable()`; exposes reset cause to `RobotController` (ADR-011) |
 | `MathUtils.h` | Header-only `constexpr` `clampSigned` / `maxOf` / `minOf` shared across modules |
 | `Pins.h` | Functional names → Arduino pin → AVR port bit → ADC channel |
-| `RobotConfig.h` | All tunable constants; PID profile structs; `static_assert`s |
+| `RobotConfig.h` | All tunable constants; `static_assert`s tying invariants to constants |
 | `AtomicGuard.h` | Header-only RAII wrapper around SREG save + `cli()` + restore (ADR-010) |
 | `FastIo.h` | Header-only sensor EN/OUT port operations |
 | `AdcDriver.*` | Direct `ADMUX`/`ADCSRA` access for ADC0/ADC1 with timeout guard |
@@ -122,9 +124,8 @@ implementation easier — open an ADR follow-up instead.
 | `MotorDriver.*` | Signed speed in, trim with clamp, ramp with startup-deadband kick, direction blanking, drive-mode-aware duty mapping |
 | `LineSensors.*` | Digital or ADC sampling, polarity, three-sample majority filter |
 | `LineEstimator.*` | Two-sensor booleans → `LineState` enum (six mutually-exclusive states) + discrete error |
-| `PdController.*` | Integer Q8 PD (no I) with caller-supplied gains and clamp |
 | `UltrasonicRangeSensor.*` | Non-blocking TRIG state machine, PCINT0 ECHO capture, distance + obstacle latch |
-| `RobotController.*` | State machine with single `transitionTo()`, 10 ms control loop, profile selection, lost-line search, obstacle stop + open-loop right turn, watchdog + `kFault`, differential-preserving `mixSaturate` |
+| `RobotController.*` | State machine with single `transitionTo()`, 10 ms control loop, go-straight cruise, debounced encounter-turn-left, obstacle stop + open-loop right turn, watchdog + `kFault` (ADR-012) |
 
 Keep hardware register writes in the existing low-level modules. Control
 logic does not directly manipulate AVR registers.
@@ -166,10 +167,24 @@ logic does not directly manipulate AVR registers.
   `Timer1MotorPwm`.
 - **`PCINT0_vect` records pulses, not distance.** All distance math, sample
   confirmation, and obstacle latching run on the main loop, not in the ISR.
-- **The right turn is open-loop and calibrated, not geometric.** Without an
-  encoder or IMU, the 90° claim is the user's calibration of
-  `kObstacleRightTurnControlTicks` against a specific battery / surface /
-  tire combination. Do not claim or imply geometric accuracy in code or docs.
+- **Both turns are open-loop and calibrated, not geometric.** Neither the
+  obstacle-avoidance right turn (`kObstacleRightTurnControlTicks`) nor the
+  encounter-driven left turn (`kEncounterTurnLeftControlTicks`) close a loop
+  on body angle — there is no encoder or IMU. Their tick counts are the
+  user's calibration against a specific battery / surface / tire combination.
+  Do not claim or imply geometric accuracy in code or docs. See ADR-005 +
+  ADR-012.
+- **Encounter-turn-left has a confirmation window.** `kGoStraight` only
+  triggers the turn after `kEncounterConfirmTicks` consecutive ticks of "saw
+  black"; a single white reading resets the counter. This is symmetric with
+  `kObstacleConfirmSamples` on the ultrasonic side and prevents edge-crossing
+  noise from triggering spurious turns. See ADR-012.
+- **In-flight turns are uninterruptible.** Once `kEncounterTurnLeft` or
+  `kAvoidanceTurnRight` starts, no new event (obstacle latch, line edge)
+  preempts it — only state's own tick counter ends it. The priority gate in
+  `runControlStep()` checks all three maneuver states (`kObstacleStop`,
+  `kAvoidanceTurnRight`, `kEncounterTurnLeft`) before any obstacle latch
+  inspection. See ADR-012 §priority.
 - **`UltrasonicRangeSensor` is a singleton by construction.** PCINT0 ISR state
   is shared file-scope globals; `begin()` traps if a second instance ever
   exists. Don't try to instantiate two.
@@ -177,11 +192,12 @@ logic does not directly manipulate AVR registers.
   watchdog kick at the top of `loop()` would mask the worst failure mode: main
   loop alive but Timer1 COMPA ISR dead. Only tick-gated kicks expose it. See
   ADR-011 §1.
-- **`mixSaturate` (control layer) and `MotorDriver::applyCompensation`'s
-  internal clamp guard different domains.** `mixSaturate` enforces the
-  ±`kMotorMaxPwm` envelope while preserving L/R differential; the clamp inside
-  `applyCompensation` catches the case where trim multiplication pushes a
-  per-side command back over the envelope. Do not collapse them.
+- **`MotorDriver::applyCompensation`'s internal clamp matters even with no
+  control-layer saturator.** ADR-012 retired `mixSaturate` along with PD; the
+  control layer no longer issues mixed differential commands. `applyCompensation`
+  still clamps because trim can push a per-side command over `kMotorMaxPwm`
+  (e.g. trim = +50% on cruise = 180 → 270 → must clamp back to 220). Do not
+  delete that clamp.
 - **`kFault` is entered on boot when the previous reset was a watchdog reset,
   and stays there.** The MCU is alive (LED blinks, `loop()` runs) but the
   control path early-returns and motors are stopped; watchdog is disabled to

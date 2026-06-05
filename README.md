@@ -1,16 +1,16 @@
-# 黑线循迹小车固件
+# 遇黑左转小车固件
 
-面向 **Arduino UNO 兼容、ATmega328P-AU 教学小车板** 的黑线循迹固件。在固定接线、低资源 AVR 环境下做可审计、低开销、默认安全的循迹与避障控制。
+面向 **Arduino UNO 兼容、ATmega328P-AU 教学小车板** 的「默认直行、遇黑左转」教学小车固件。在固定接线、低资源 AVR 环境下做可审计、低开销、默认安全的行为控制。
 
 不追求跨板可移植性：`Pins.h` 是接线事实源，代码直接依赖 ArduinoCore-avr standard variant 的 UNO 引脚表。
 
 ## 功能概述
 
+- **行为**：默认双轮匀速直行；任一传感器连续 `kEncounterConfirmTicks` 个 tick 见黑就触发一次开环左转，转完回到直行（ADR-012）。
 - **电机驱动**：L9110S-MS 双输入；默认高侧刹车 / 反相 PWM 模式，含 ramp、启动死区跳变、方向切换空档、左右补偿。
 - **PWM 与控制 tick**：Timer1 CTC 软件 PWM @ 4 kHz；每 40 个 PWM 周期一次 10 ms 控制 tick。Timer0 / Timer2 完全不动。
-- **循迹**：A0 / A1 双数字传感器，D2 / A5 控 EN；3 样本多数表决；保留 ADC 模式备用。
-- **避障**：D13 TRIG、D12 ECHO（通过 ATmega328P PCINT4 捕获，非阻塞）；连续 2 帧 ≤ 200 mm 进入停车，再开环右转。
-- **控制算法**：整数 Q8 **PD**（无 I——见 ADR-008），按 `{直线 / 弯道 / 保守 / 寻线}` profile 切换增益与限幅；饱和时差分保持混控（ADR-011），整车被动降速过弯而不吃 PD 命令；失线后按最后误差低速搜索，超时停车。
+- **传感器**：A0 / A1 双数字传感器，D2 / A5 控 EN；3 样本多数表决；保留 ADC 模式备用。
+- **避障**：D13 TRIG、D12 ECHO（通过 ATmega328P PCINT4 捕获，非阻塞）；连续 2 帧 ≤ 200 mm 触发停车 → 开环右转。优先级最高，但已开始的左转/右转不可被打断。
 - **失活保护**：120 ms watchdog + `.init3` 段 MCUSR 捕获；上一帧固件失活（ISR 死循环、UB）即永久进 `kFault`，关 WDT、电机断电（ADR-011）。
 
 ## 编译
@@ -38,9 +38,8 @@ arduino-cli compile --fqbn arduino:avr:uno --warnings all .
 | `MotorDriver.*` | 有符号速度、限幅、左右 trim、ramp、启动死区跳变、方向切换空档、驱动模式映射。 |
 | `LineSensors.*` | 数字/模拟采样、极性、3 样本多数表决。 |
 | `LineEstimator.*` | 双传感器布尔值 → `LineState` enum（互斥的 6 态）+ 离散误差。 |
-| `PdController.*` | 整数 Q8 PD（只有 P + D，没有 I）；调用方传入 profile 增益与限幅。 |
 | `UltrasonicRangeSensor.*` | 非阻塞 TRIG 状态机、PCINT0 ECHO 捕获、距离换算、避障 latch。 |
-| `RobotController.*` | 主状态机；10 ms 控制循环；分层循迹；失线搜索；避障停车与开环右转；差分保持饱和混控；watchdog + kFault 永久停车（ADR-011）。 |
+| `RobotController.*` | 主状态机；10 ms 控制循环；默认直行；遇黑去抖触发开环左转；避障停车与开环右转；watchdog + kFault 永久停车（ADR-011 / ADR-012）。 |
 | `docs/line-follower-plan-and-spec.md` | 详细规范、接线、验证策略、开放问题。 |
 | `docs/decisions/` | 架构决策记录（ADR-001 至 ADR-010）。 |
 
@@ -68,6 +67,21 @@ A6 / A7 是 ADC-only 引脚，首版不使用，也不能当数字 I/O。
 Timer1 在 16 MHz / prescaler 8 / TOP=499 下产生 4 kHz PWM（0.5 µs 分辨率，每个周期 250 µs）。COMPA ISR 每个周期开始置位 PWM 高电平、调度第一个下降沿、推进时基；每 40 个周期置位一次控制 tick。
 
 `loop()` 只调用 `RobotController::poll()`。`poll()` 高频轮询超声波状态机，并在控制 tick 就绪时跑一次控制步。如果错过多个 tick，记录 `missedControlTicks_` 但只跑最新一帧——不补跑历史 tick，避免延迟累积。
+
+### 默认直行 + 遇黑左转
+
+控制状态机：
+
+```
+kSensorSettle  →  kGoStraight  ──见黑 N 帧──→  kEncounterTurnLeft  ──tick 到点──→ kSensorSettle
+                       │
+                       └──超声波连续确认障碍──→  kObstacleStop  →  kAvoidanceTurnRight  →  kSensorSettle
+```
+
+- 默认 `kGoStraight`：双轮 `kMotorCruisePwm` 匀速直行。
+- 任一传感器（A0 右 / A1 左）连续 `kEncounterConfirmTicks` 个 control tick 见黑就触发开环左转（L 反转、R 正转），持续 `kEncounterTurnLeftControlTicks`，完了重回 settle 再到直行。
+- 超声波避障优先级最高，但**已开始的转向（左转或右转）不可被打断**——避免动作中途反悔。
+- `kEncounterTurnLeft` 的 tick 数与现有 `kObstacleRightTurnControlTicks` 同款逻辑：**开环、按 tick 数计时，不是几何角度保证**。硬件阶段必须按实际目标转角重新标定（见 ADR-005 / ADR-012）。
 
 ### 电机驱动
 
@@ -97,23 +111,17 @@ ObstacleStop（短暂停车）
   → SensorSettle
 ```
 
-90° 是开环标定的结果，**不是几何保证**——电池电压、地面摩擦、轮胎都会让它漂移。
-
-### 失线策略
-
-`BetweenSensors` 模式下，双白可能是正常居中也可能是脱轨。**只有过去见过偏差**（`lastError != 0`）后**再**持续双白 `kAmbiguousCenterLimitTicks` 个 tick（默认 80 ≈ 0.8 s）才进入失线——长直线居中场景 `lastError` 一直是 0，永远不会误判（见 ADR-008）。
-
-失线后按最后误差低速原地搜线；超过 `kLineLostStopTicks` 进入 `Stopped`。
+90° / 左转角度都是开环标定的结果，**不是几何保证**——电池电压、地面摩擦、轮胎都会让它漂移。
 
 ## 调参
 
 调参从 `RobotConfig.h` 开始：
 
-- **电机**：`kMotorDriveMode`、`kMotor{Straight,Curve,Cautious,Search}Pwm`、`kMotorMaxPwm`、`kMotorRampStepPerControlTick`、`kMotorMinimumEffectivePwm`、`k{Left,Right}MotorTrimPermille`。控制层 `mixSaturate` 在 PWM 域差分保持地把命令压回 ±`kMotorMaxPwm`（ADR-011 §3）；trim 在 `MotorDriver` 内做左右差分补偿，保留独立的二次 clamp 守 trim 放大后的越限。
+- **巡航**：`kMotorCruisePwm`（默认 180，约 71% 有效驱动）。
+- **遇黑左转**：`kEncounterTurnLeftPwm`（默认 160）、`kEncounterTurnLeftControlTicks`（默认 55，**初值，需硬件标定**）、`kEncounterConfirmTicks`（默认 2，连续 N tick 见黑才触发，1 = 关闭去抖）。
+- **电机包络**：`kMotorMaxPwm`（默认 220）、`kMotorDriveMode`、`kMotorRampStepPerControlTick`、`kMotorMinimumEffectivePwm`、`k{Left,Right}MotorTrimPermille`。trim 在 `MotorDriver` 内做左右差分补偿，独立的 clamp 守 trim 放大后的越限。
 - **方向**：`kInvert{Left,Right}Motor`、`k{Left,Right}ForwardUsesIb`。
-- **传感器**：`kSensorMode`、`kSensorEnableActiveLevel`、`kSensorBlackLevel`、`kCenterMode`、`kAdcBlackThreshold`、`kAdcHysteresis`、`kSensorSettleControlTicks`。
-- **PD**：`kPdStraightGainsQ8`、`kPdCurveGainsQ8`、`kPdStraightMaxCorrection`、`kPdCurveMaxCorrection`、`kLineCurveErrorThreshold`。
-- **失线**：`kAmbiguousCenterLimitTicks`、`kLineLostStopTicks`。
+- **传感器**：`kSensorMode`、`kSensorEnableActiveLevel`、`kSensorBlackLevel`、`kCenterMode`、`kAdcBlackThreshold`、`kAdcHysteresis`、`kSensorSettleControlTicks`（必须 ≥ `LineSensors::kHistoryDepth`，已用 `static_assert` 守门）。
 - **避障**：`kObstacleAvoidanceEnabled`、`kObstacleStopDistanceMm`、`kObstacleConfirmSamples`、`kObstacleClearSamples`、`kObstacleStopHoldControlTicks`、`kObstacleRightTurnPwm`、`kObstacleRightTurnControlTicks`、`kUltrasonicMeasurementIntervalMs`。
 
 改 `Pins.h` 属于硬件接线变更，必须先核对原理图或实测结果，再同步本 README、`docs/line-follower-plan-and-spec.md` 和相关 ADR。
@@ -137,8 +145,9 @@ ObstacleStop（短暂停车）
    - 电机在更低占空比已能起转：降低该值减小启动冲击。
    - 电机更迟才起转：优先提高基础速度而不是无脑放大 minimum，避免反向制动过冲。
    - 在 `kBrakeHighSideInversePwm` 模式下，`kMotor*Pwm = 128` ≈ 50% 驱动；`= 255` = 整周期驱动。
-5. **标定低速原地右转 90°**：右转 PWM 默认 140，旧标定必须重做。
-6. **PD 调参**：先调直线 P、再调直线 D；再调弯道 P、D。每次调整都记录电池状态和环境。本项目刻意不使用 I（理由见 ADR-008）。
+   - 本次（ADR-012）巡航 PWM 从 160 → 180，最大限幅从 200 → 220；首跑必须实测 L9110S 温度与电池压降。
+5. **标定遇黑左转 + 避障右转**：两者都是开环按 tick 计时，必须分别在地面上标定到接近期望转角；标定方法相同（轮子离地确认方向 → 落地短时测量 → 写回常量）。
+6. **去抖 trade-off**：若发现"压线才转"，把 `kEncounterConfirmTicks` 从 2 降到 1 关闭去抖（代价是边缘穿越可能误触发）。
 
 ## 设计记录
 
@@ -154,6 +163,7 @@ ObstacleStop（短暂停车）
 - [ADR-009：RobotController 状态机清理与模块解耦](docs/decisions/ADR-009-state-machine-cleanup.md)
 - [ADR-010：AtomicGuard RAII、LineState enum 与 .cpp-only 工具](docs/decisions/ADR-010-raii-atomic-and-line-state-cleanup.md)
 - [ADR-011：Watchdog、kFault、差分保持饱和混控、共享数学工具](docs/decisions/ADR-011-watchdog-fault-state-and-saturation-mix.md)
+- [ADR-012：行为切换为「遇黑左转」+ PD 路径全量删除 + 适度提速](docs/decisions/ADR-012-encounter-turn-left-and-pd-removal.md)
 
 ## 许可证
 

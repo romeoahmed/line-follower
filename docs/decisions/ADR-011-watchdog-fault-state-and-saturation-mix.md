@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted; supersedes ADR-010 §7 on the saturation policy.
+Accepted; supersedes ADR-010 §7 on the saturation policy; §3 (mixSaturate) retired by ADR-012 (no PD command path remains; the function and `lastError_` were deleted alongside PdController). §1 (watchdog + kFault + .init3 MCUSR), §2 (PD reset on skip), §4 (MathUtils.h), §5 (UltrasonicRangeSensor::resetState) all stand.
 
 ## Date
 
