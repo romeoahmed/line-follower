@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted; ki retention and ambiguous-timeout default superseded by ADR-008
+Accepted; ki retention and ambiguous-timeout default superseded by ADR-008; control profiles and PD-driven follow superseded by ADR-012 (line-following retired)
 
 ## Date
 

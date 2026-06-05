@@ -269,74 +269,87 @@ value = (ADCH << 8) | ADCL
 
 ## 9. 控制算法与状态机
 
+ADR-012 之后，项目顶层行为是「默认直行 + 遇黑左转」，**不是**「黑线循迹」。本节
+按新行为描述；旧的「分层 profile + PID + 失线搜索」机制已经从代码与配置中删除，
+历史动机仍记录在 ADR-005 / ADR-007 / ADR-008 / ADR-011。
+
 ### 9.1 控制 tick
 
-Timer1 每 40 个 PWM 周期置位一次 `controlTickDue`。主循环看到 flag 后：
+Timer1 每 40 个 PWM 周期置位一次 `controlTickDue`。`RobotController::poll()` 看到
+flag 后：
 
-1. 非阻塞轮询超声波 TRIG/ECHO 状态机。
-2. 清 flag。
-3. 若避障 latch 生效，立即进入 `ObstacleStop`，再按固定时长开环右转。
-4. 读取循迹传感器。
-5. 更新线位估计。
-6. 更新状态机。
-7. 按线位状态选择直线、弯道或保守 profile。
-8. 用该 profile 的 Q8 PID 增益和输出限幅计算修正量。
-9. 混控左右目标速度，并应用 trim、限幅、ramp、方向空档。
-10. 提交下一周期 PWM 影子缓冲。
-
-主循环不得补跑历史 tick；如果错过 tick，只记录 missed counter，下一轮使用最新状态。
+1. 喂狗 (`wdt_reset()`)——tick-gated 才能抓 Timer1 ISR 静默失效。
+2. 按状态分派：
+   - `kStopped` / `kFault`：永久停车，早返回。
+   - `kObstacleStop` / `kAvoidanceTurnRight` / `kEncounterTurnLeft`：进行中的
+     机动不可被打断，直接跑该状态的 handler。
+   - 否则，若超声波 latch 生效 → `transitionTo(kObstacleStop)`。
+   - `kSensorSettle`：跑采样让多数表决预热满窗口，电机锁 0，到点转 `kGoStraight`。
+   - `kGoStraight`：读传感器 → 估计 → 见黑去抖 → 触发 `kEncounterTurnLeft`，否则
+     双轮 `kMotorCruisePwm` 直行。
+3. 不补跑历史 tick；错过的 tick 只记到 `missedControlTicks_`（saturating，
+   16-bit）。
 
 ### 9.2 线位估计
 
-| CenterMode | 左 | 右 | 解释 | 误差 |
-|---|---|---|---|---:|
-| `BetweenSensors` | 白 | 白 | 可能居中，也可能白底丢线 | 0，标记 ambiguous |
-| `BetweenSensors` | 黑 | 白 | 线偏左 | -1000 |
-| `BetweenSensors` | 白 | 黑 | 线偏右 | +1000 |
-| `BetweenSensors` | 黑 | 黑 | 宽线/交叉/传感器过近 | 0，标记 intersectionLike |
-| `OnLine` | 黑 | 黑 | 居中 | 0 |
-| `OnLine` | 黑 | 白 | 偏左 | -1000 |
-| `OnLine` | 白 | 黑 | 偏右 | +1000 |
-| `OnLine` | 白 | 白 | 明确失线候选 | invalid |
+`LineEstimator` 把双传感器布尔值映射到 6 态互斥 `LineState` enum + 离散误差。
+新行为下控制层**只消费 state**，不消费 error 数值（仍保留 `kLineErrorUnit` 让
+LineEstimator 与未来连续误差源兼容）。
 
-双数字传感器无法凭单帧读数解决所有歧义；`BetweenSensors` 模式下双白可能是正常居中，也可能是白底丢线。默认不只凭双白持续时间强行判定失线，`kAmbiguousCenterLimitTicks = 0` 表示关闭这个启发式；如果赛道没有长直线双白居中场景，才建议设置为正数。
+| CenterMode | 左 | 右 | LineState | 控制层判定 |
+|---|---|---|---|---|
+| `BetweenSensors` | 白 | 白 | `kAmbiguous` | 没见到黑 → 直行 |
+| `BetweenSensors` | 黑 | 白 | `kOffsetLeft` | 见到黑 → 触发左转 |
+| `BetweenSensors` | 白 | 黑 | `kOffsetRight` | 见到黑 → 触发左转 |
+| `BetweenSensors` | 黑 | 黑 | `kIntersection` | 见到黑 → 触发左转 |
+| `OnLine` | 黑 | 黑 | `kCentered` | 见到黑 → 触发左转 |
+| `OnLine` | 黑 | 白 | `kOffsetLeft` | 见到黑 → 触发左转 |
+| `OnLine` | 白 | 黑 | `kOffsetRight` | 见到黑 → 触发左转 |
+| `OnLine` | 白 | 白 | `kInvalid` | 采样无效 → 直行（默认安全） |
 
-### 9.3 PID
+ADC 采样失败 → `kInvalid` 一律视为「没见到黑」，继续直行；这是默认安全策略，避免
+传感器异常时车在路上自旋。
 
-整数 Q8 位置式 PID：
+### 9.3 触发去抖
 
-```text
-integral = clamp(integral + error, -integralLimit, +integralLimit)
-derivative = error - previousError
-raw = kp * error + ki * integral + kd * derivative
-correction = clamp(raw / 256, -maxCorrection, +maxCorrection)
-```
+`runGoStraight` 维护一个连续见黑的 tick 计数（复用 `stateTicks_`）：
 
-规则：
+- 见黑：`++stateTicks_`，达到 `kEncounterConfirmTicks` 即 `transitionTo(kEncounterTurnLeft)`。
+- 见白（或采样无效）：`stateTicks_ = 0`，序列重置。
 
-- 中间值 `int32_t`。
-- 直线和弯道使用不同 `PidGainsQ8` 与 `maxCorrection`；当前双数字传感器只能做离散 profile 切换，不能构造真实连续线位。
-- `ki` 初始 0。
-- 输出饱和时冻结或回退积分。
-- 失线、停车、模式切换时 reset/freeze 积分。
-- 双白中心候选和交叉/宽线候选不更新 PID，只保持保守直行或低速直行。
+默认 `kEncounterConfirmTicks = 2`，等于 20 ms 触发延迟，与避障 `kObstacleConfirmSamples`
+对称。设为 1 即关闭去抖。
 
-### 9.4 状态机
+### 9.4 开环转向
+
+两个转向 handler 共用同款骨架：
+
+- `kEncounterTurnLeft`：双轮 `(-kEncounterTurnLeftPwm, +kEncounterTurnLeftPwm)`，
+  跑 `kEncounterTurnLeftControlTicks` 个 tick，然后 `motors_.stopNow()` + 回
+  `kSensorSettle`。**不调** `restartAfterManeuver()`（入口不是 obstacle latch，
+  且测距持续运行能在左转期间响应突发障碍）。
+- `kAvoidanceTurnRight`：双轮 `(+kObstacleRightTurnPwm, -kObstacleRightTurnPwm)`，
+  跑 `kObstacleRightTurnControlTicks` 个 tick，然后 `motors_.stopNow()` +
+  `ultrasonic_.restartAfterManeuver()` + 回 `kSensorSettle`。
+
+没有轮速编码器、IMU 或舵机扫描时，固件无法从几何上闭环证明转向角度。当前做法
+是把两个转向定义为可标定开环动作：实车用低速原地转向测出接近期望角度的时间，
+再写入对应常量。
+
+### 9.5 状态机
 
 | 状态 | 行为 |
 |---|---|
-| `Boot` | 端口安全初始化，Timer1 未启动前四路电机低 |
-| `TimerReady` | Timer1 CTC/PWM 启动，PWM shadow 全 0 |
-| `SensorSettle` | EN 生效后等待传感器稳定 |
-| `FollowLine` | 分层速度和可变 Q8 PID 差速循迹 |
-| `LineLost` | 冻结积分，按最后误差低速搜索；超时停车 |
-| `ObstacleStop` | 超声波连续确认近距离障碍后立即拉低电机，并保持短暂停车 |
-| `ObstacleTurnRight` | 左轮前进、右轮后退，按标定 tick 开环右转约 90° |
-| `Stopped` | 四路电机输入低，等待复位或未来启动输入 |
+| `kSensorSettle` | EN 生效后等传感器多数表决窗口跑满；电机锁 0 |
+| `kGoStraight` | 双轮 `kMotorCruisePwm` 匀速直行；任一传感器连续 `kEncounterConfirmTicks` 见黑触发左转 |
+| `kEncounterTurnLeft` | L 反转 / R 正转，按 `kEncounterTurnLeftControlTicks` 开环计时；不可被打断 |
+| `kObstacleStop` | 超声波连续确认近距离障碍后立即拉低电机，并保持短暂停车 |
+| `kAvoidanceTurnRight` | L 正转 / R 反转，按 `kObstacleRightTurnControlTicks` 开环右转；不可被打断 |
+| `kStopped` | 四路电机输入低，永久停车 |
+| `kFault` | boot 时 MCUSR.WDRF 触发；关 WDT + 电机断电；MCU 仍跑 loop() 便于调试 |
 
-没有轮速编码器、IMU 或舵机扫描时，固件无法从几何上闭环证明“正好 90°”。当前做法是把动作定义为可标定开环右转：实车用低速原地转向测出接近 90° 的时间，再写入 `kObstacleRightTurnControlTicks`。
-
-当前首版接线表没有按键引脚，首版不设计按键启动。
+所有 `state_` 写入仍只走 `transitionTo()`；`stateTicks_` 由它统一清零。
+当前接线表没有按键引脚，不设计按键启动。
 
 ## 10. 代码结构
 
@@ -348,13 +361,12 @@ correction = clamp(raw / 256, -maxCorrection, +maxCorrection)
 ├── FastIo.h                    # 固定端口位操作
 ├── Timer1MotorPwm.h/.cpp       # Timer1 CTC、软件 PWM、control tick flag
 ├── AdcDriver.h/.cpp            # ADC0/ADC1 直接寄存器读取
-├── RobotConfig.h               # 所有速度、PID、避障、传感器和电机配置
+├── RobotConfig.h               # 所有速度、行为、避障、传感器和电机配置
 ├── MotorDriver.h/.cpp          # 有符号速度、方向、trim、ramp、dead-time
 ├── LineSensors.h/.cpp          # EN/OUT、数字/ADC、极性、滤波
 ├── LineEstimator.h/.cpp
-├── PidController.h/.cpp        # Q8 PID，增益/限幅由控制 profile 传入
 ├── UltrasonicRangeSensor.h/.cpp # PCINT Echo 捕获、Timer1 时间戳、避障 latch
-├── RobotController.h/.cpp      # 分层循迹、失线搜索、开环右转避障
+├── RobotController.h/.cpp      # 直行 + 遇黑左转 + 避障右转（ADR-012）
 └── docs/
     ├── line-follower-plan-and-spec.md
     └── decisions/
@@ -536,7 +548,7 @@ arduino-cli compile --fqbn arduino:avr:uno --warnings all .
 - 先传感器，后电机。
 - 超声波先静态验证 20 cm、50 cm、100 cm 三点读数趋势，再接入电机电源。
 - 先单轮点动，后双轮低速。
-- 低速原地右转 90° 必须轮子离地先确认方向，再落地短时标定。
+- 低速原地左转 / 右转都必须轮子离地先确认方向，再落地短时分别标定（左右不一定对称）。
 - 先低 `maxPwm`，记录温升后再提高。
 - 上传/调试和电机供电的组合必须按板卡说明；没有说明则电机电源关闭。
 
@@ -549,13 +561,13 @@ Always：
 - 四路电机 PWM 都由 Timer1 软件 PWM 输出。
 - 控制 tick 来自 Timer1，不依赖 `micros()`。
 - 超声波 Echo 捕获只用 PCINT 和 Timer1 时间戳，不新增 timer。
-- 避障 90° 是开环标定动作，不得写成“无需硬件校准的精确角度”。
+- 避障右转与遇黑左转**都是**开环标定动作，不得写成“无需硬件校准的精确角度”。
 - 硬件未知项配置化。
 - Watchdog 在正常路径开启（120 ms）；boot 路径检测到上一次复位由 WDT 触发即
   永久进 `kFault`，关 WDT、电机断电。`wdt_reset()` 只在控制 tick 推进时调用，
   让 Timer1 COMPA ISR 静默失效也能被抓住（见 ADR-011）。
-- 控制层 PWM 混控用差分保持饱和（`mixSaturate`）：饱和时差分守恒，整车被动
-  降速过弯，PD 命令不被吃。`MotorDriver` 内 trim 后的 clamp 保留，守不同域。
+- 已开始的转向机动（左转或右转）不可被任何新事件打断；只有该状态自己的 tick
+  计数器把它推回 `kSensorSettle`（见 ADR-012）。
 
 Ask first：
 
@@ -585,3 +597,5 @@ Never：
 6. 4 kHz 软件 PWM 的电机噪声和低速扭矩是否可接受？如不可接受，再评估 8 kHz 与 ISR 预算。
 7. 实物超声波模块丝印和资料是否确认为 HC-SR04 兼容？D13 板载 LED 负载是否影响 TRIG 边沿？
 8. `kObstacleRightTurnPwm` 与 `kObstacleRightTurnControlTicks` 在当前电池电压、地面摩擦和轮胎状态下是否接近 90°？
+9. `kEncounterTurnLeftControlTicks` 在当前条件下实际转出多少度？是否需要与右转分别标定？（ADR-012 起的新参数。）
+10. 提速后（巡航 180 PWM、最大 220）L9110S 在该 PCB 上的连续散热与电池压降是否仍在安全包络？（ADR-012。）

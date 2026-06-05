@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Accepted; superseded by ADR-012 (line-following retired; PD entirely removed)
 
 ## Date
 

@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Accepted; state set partially superseded by ADR-012 (kFollowLine→kGoStraight, kLineLost retired, kObstacleTurnRight→kAvoidanceTurnRight, kEncounterTurnLeft added). The "single transitionTo() write-gate" + "single stateTicks_" architectural principles stand.
 
 ## Date
 

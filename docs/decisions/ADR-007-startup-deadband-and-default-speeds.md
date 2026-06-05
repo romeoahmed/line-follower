@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Accepted; speed defaults superseded by ADR-012 (cruise/max PWM uplifted alongside behavior change)
 
 ## Date
 
