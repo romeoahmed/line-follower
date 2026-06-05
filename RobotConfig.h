@@ -89,18 +89,20 @@ constexpr uint16_t kAdcHysteresis = 24;
 
 constexpr uint8_t kSensorSettleControlTicks = 10;
 
-// 遇黑左转（ADR-012）：
+// 遇黑左转（ADR-012；触发严苛化见 ADR-012 Revision 1 / 同步更新）：
 //   - kEncounterTurnLeftPwm：开环左转期间双轮的速度幅值；L 反转、R 正转。
 //     与原地避障右转 (kObstacleRightTurnPwm=140) 同量级；左转 PWM 略高 (160)
 //     补偿首次校准的预算。
 //   - kEncounterTurnLeftControlTicks：开环左转持续多少个 10 ms 控制 tick。
 //     **初值 = 右转开环 tick 数**（对称起点），硬件阶段按实测目标转角重新标定；
 //     与 kObstacleRightTurnControlTicks 一样不是几何保证，参考 ADR-005 的诚实化做法。
-//   - kEncounterConfirmTicks：连续 N 个 control tick 见黑才触发左转，去抖
-//     边缘穿越；镜像 kObstacleConfirmSamples。设 1 即关闭去抖。
+//   - kEncounterConfirmTicks：连续 N 个 control tick **两个传感器都见黑**才
+//     触发左转。触发判定本身已经从"任一见黑"严苛到"双黑"（estimateSawBlack
+//     在 RobotController.cpp）；去抖窗口默认 5 tick（= 50 ms）覆盖一次性反光、
+//     单帧噪声、车头跨黑线时的边缘抖动。设 1 即关闭去抖。
 constexpr uint8_t kEncounterTurnLeftPwm = 160;
 constexpr uint16_t kEncounterTurnLeftControlTicks = 55;
-constexpr uint8_t kEncounterConfirmTicks = 2;
+constexpr uint8_t kEncounterConfirmTicks = 5;
 
 static_assert(kEncounterTurnLeftPwm <= kMotorMaxPwm, "遇黑左转速度不能超过电机限幅。");
 static_assert(kEncounterTurnLeftControlTicks > 0, "遇黑左转持续时间必须为正。");

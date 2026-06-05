@@ -296,29 +296,34 @@ flag 后：
 新行为下控制层**只消费 state**，不消费 error 数值（仍保留 `kLineErrorUnit` 让
 LineEstimator 与未来连续误差源兼容）。
 
-| CenterMode | 左 | 右 | LineState | 控制层判定 |
+| CenterMode | 左 | 右 | LineState | 控制层判定（ADR-012 Rev 1） |
 |---|---|---|---|---|
 | `BetweenSensors` | 白 | 白 | `kAmbiguous` | 没见到黑 → 直行 |
-| `BetweenSensors` | 黑 | 白 | `kOffsetLeft` | 见到黑 → 触发左转 |
-| `BetweenSensors` | 白 | 黑 | `kOffsetRight` | 见到黑 → 触发左转 |
-| `BetweenSensors` | 黑 | 黑 | `kIntersection` | 见到黑 → 触发左转 |
-| `OnLine` | 黑 | 黑 | `kCentered` | 见到黑 → 触发左转 |
-| `OnLine` | 黑 | 白 | `kOffsetLeft` | 见到黑 → 触发左转 |
-| `OnLine` | 白 | 黑 | `kOffsetRight` | 见到黑 → 触发左转 |
+| `BetweenSensors` | 黑 | 白 | `kOffsetLeft` | **单边偏黑 → 不触发**，按"没见到黑"处理 |
+| `BetweenSensors` | 白 | 黑 | `kOffsetRight` | **单边偏黑 → 不触发**，按"没见到黑"处理 |
+| `BetweenSensors` | 黑 | 黑 | `kIntersection` | **双黑 → 进入触发去抖窗口** |
+| `OnLine` | 黑 | 黑 | `kCentered` | **双黑 → 进入触发去抖窗口** |
+| `OnLine` | 黑 | 白 | `kOffsetLeft` | 单边偏黑 → 不触发 |
+| `OnLine` | 白 | 黑 | `kOffsetRight` | 单边偏黑 → 不触发 |
 | `OnLine` | 白 | 白 | `kInvalid` | 采样无效 → 直行（默认安全） |
+
+ADR-012 初版把"任一传感器见黑"算作遇黑；Rev 1（同 ADR）严苛收紧到"两个
+传感器都见黑"——挡掉细黑线 / 反光 / 斑点 / 边缘斜扫造成的单边偏黑误触发。
 
 ADC 采样失败 → `kInvalid` 一律视为「没见到黑」，继续直行；这是默认安全策略，避免
 传感器异常时车在路上自旋。
 
 ### 9.3 触发去抖
 
-`runGoStraight` 维护一个连续见黑的 tick 计数（复用 `stateTicks_`）：
+`runGoStraight` 维护一个连续"双黑"的 tick 计数（复用 `stateTicks_`）：
 
-- 见黑：`++stateTicks_`，达到 `kEncounterConfirmTicks` 即 `transitionTo(kEncounterTurnLeft)`。
-- 见白（或采样无效）：`stateTicks_ = 0`，序列重置。
+- 两个传感器同时见黑（`kIntersection` / `kCentered`）：`++stateTicks_`，达到
+  `kEncounterConfirmTicks` 即 `transitionTo(kEncounterTurnLeft)`。
+- 任何其它读数（单边偏黑、双白、采样无效）：`stateTicks_ = 0`，序列重置。
 
-默认 `kEncounterConfirmTicks = 2`，等于 20 ms 触发延迟，与避障 `kObstacleConfirmSamples`
-对称。设为 1 即关闭去抖。
+默认 `kEncounterConfirmTicks = 5`（50 ms 触发延迟）。配合「双黑」严苛触发，
+单一帧的反光 / 单边斑点 / 边缘斜扫都不会让计数进展。窗口设为 1 关闭去抖
+（不推荐——单帧噪声足以触发）。
 
 ### 9.4 开环转向
 
@@ -341,7 +346,7 @@ ADC 采样失败 → `kInvalid` 一律视为「没见到黑」，继续直行；
 | 状态 | 行为 |
 |---|---|
 | `kSensorSettle` | EN 生效后等传感器多数表决窗口跑满；电机锁 0 |
-| `kGoStraight` | 双轮 `kMotorCruisePwm` 匀速直行；任一传感器连续 `kEncounterConfirmTicks` 见黑触发左转 |
+| `kGoStraight` | 双轮 `kMotorCruisePwm` 匀速直行；两个传感器**同时**连续 `kEncounterConfirmTicks` 见黑（`kIntersection`）触发左转 |
 | `kEncounterTurnLeft` | L 反转 / R 正转，按 `kEncounterTurnLeftControlTicks` 开环计时；不可被打断 |
 | `kObstacleStop` | 超声波连续确认近距离障碍后立即拉低电机，并保持短暂停车 |
 | `kAvoidanceTurnRight` | L 正转 / R 反转，按 `kObstacleRightTurnControlTicks` 开环右转；不可被打断 |

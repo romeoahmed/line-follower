@@ -7,16 +7,22 @@
 namespace lf {
 namespace {
 
-// 行为入口判定：任一传感器见黑就算"遇到黑线"。kCentered 在默认 kBetweenSensors
-// 模式下不会出现，包含进来是 forward-looking——切到 kOnLine 时无需改这一行。
-// kAmbiguous / kInvalid 视为"没见到黑"，继续直行。
+// 行为入口判定：**两个传感器都**见到黑才算"遇到黑线"。
+//   - kIntersection 是 kBetweenSensors 模式下双黑（宽线 / 交叉路口 / 满足整条
+//     黑线落入两个传感器之间）。
+//   - kCentered 是 kOnLine 模式下双黑（车正压在黑线上）；默认模式下不会出现，
+//     列在这里是 forward-looking。
+//   - kOffsetLeft / kOffsetRight（单边偏黑）不再触发——它们多发生在车从白底
+//     斜插入黑线边缘、或传感器扫过细线边缘的瞬间，对"识别一条完整黑线"是
+//     误报。新行为要求"两个传感器都进入黑线区域"才反应，明显更严苛。
+//   - kAmbiguous / kInvalid 视为"没见到黑"，继续直行。
 bool estimateSawBlack(const LineEstimate& estimate) {
   switch (estimate.state) {
-  case LineState::kOffsetLeft:
-  case LineState::kOffsetRight:
   case LineState::kIntersection:
   case LineState::kCentered:
     return true;
+  case LineState::kOffsetLeft:
+  case LineState::kOffsetRight:
   case LineState::kAmbiguous:
   case LineState::kInvalid:
     return false;
