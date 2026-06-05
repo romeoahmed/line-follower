@@ -21,6 +21,9 @@ class LineSensors {
   static constexpr uint8_t kHistoryMask = (1u << kHistoryDepth) - 1u;
   static constexpr uint8_t kHistoryMajority = kHistoryDepth / 2 + 1;
   static_assert(kHistoryDepth >= 1 && kHistoryDepth <= 8, "history 必须 fit in uint8_t。");
+  static_assert(RobotConfig::kSensorSettleControlTicks >= kHistoryDepth,
+                "kSensorSettleControlTicks 必须把多数表决窗口跑满，否则退出 settle 时 "
+                "filter 仍走 warmup 早返回路径，跨状态时 sample 与 filter 不一致。");
 
   void begin();
   LineSensorSample sample();
