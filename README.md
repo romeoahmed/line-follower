@@ -6,7 +6,7 @@
 
 ## 功能概述
 
-- **行为**：默认双轮匀速直行；任一传感器连续 `kEncounterConfirmTicks` 个 tick 见黑就触发一次开环左转，转完回到直行（ADR-012）。
+- **行为**：默认双轮匀速直行；**两个传感器同时**连续 `kEncounterConfirmTicks` 个 tick 见黑（即整条黑线横在车前）才触发一次开环左转，转完回到直行（ADR-012 / Rev 1）。单边偏黑、反光、斑点不触发。
 - **电机驱动**：L9110S-MS 双输入；默认高侧刹车 / 反相 PWM 模式，含 ramp、启动死区跳变、方向切换空档、左右补偿。
 - **PWM 与控制 tick**：Timer1 CTC 软件 PWM @ 4 kHz；每 40 个 PWM 周期一次 10 ms 控制 tick。Timer0 / Timer2 完全不动。
 - **传感器**：A0 / A1 双数字传感器，D2 / A5 控 EN；3 样本多数表决；保留 ADC 模式备用。
@@ -79,7 +79,7 @@ kSensorSettle  →  kGoStraight  ──见黑 N 帧──→  kEncounterTurnLeft
 ```
 
 - 默认 `kGoStraight`：双轮 `kMotorCruisePwm` 匀速直行。
-- 任一传感器（A0 右 / A1 左）连续 `kEncounterConfirmTicks` 个 control tick 见黑就触发开环左转（L 反转、R 正转），持续 `kEncounterTurnLeftControlTicks`，完了重回 settle 再到直行。
+- **两个传感器**（A0 右 + A1 左）**同时**连续 `kEncounterConfirmTicks` 个 control tick 见黑（`LineState::kIntersection`）才触发开环左转（L 反转、R 正转），持续 `kEncounterTurnLeftControlTicks`，完了重回 settle 再到直行。**单边偏黑不触发**——严苛挡误识别（窄白底斑点 / 反光 / 边缘斜扫）。
 - 超声波避障优先级最高，但**已开始的转向（左转或右转）不可被打断**——避免动作中途反悔。
 - `kEncounterTurnLeft` 的 tick 数与现有 `kObstacleRightTurnControlTicks` 同款逻辑：**开环、按 tick 数计时，不是几何角度保证**。硬件阶段必须按实际目标转角重新标定（见 ADR-005 / ADR-012）。
 
@@ -118,7 +118,7 @@ ObstacleStop（短暂停车）
 调参从 `RobotConfig.h` 开始：
 
 - **巡航**：`kMotorCruisePwm`（默认 180，约 71% 有效驱动）。
-- **遇黑左转**：`kEncounterTurnLeftPwm`（默认 160）、`kEncounterTurnLeftControlTicks`（默认 55，**初值，需硬件标定**）、`kEncounterConfirmTicks`（默认 2，连续 N tick 见黑才触发，1 = 关闭去抖）。
+- **遇黑左转**：`kEncounterTurnLeftPwm`（默认 160）、`kEncounterTurnLeftControlTicks`（默认 55，**初值，需硬件标定**）、`kEncounterConfirmTicks`（默认 5 = 50 ms，连续 N tick **两个传感器都见黑**才触发；1 = 关闭去抖）。
 - **电机包络**：`kMotorMaxPwm`（默认 220）、`kMotorDriveMode`、`kMotorRampStepPerControlTick`、`kMotorMinimumEffectivePwm`、`k{Left,Right}MotorTrimPermille`。trim 在 `MotorDriver` 内做左右差分补偿，独立的 clamp 守 trim 放大后的越限。
 - **方向**：`kInvert{Left,Right}Motor`、`k{Left,Right}ForwardUsesIb`。
 - **传感器**：`kSensorMode`、`kSensorEnableActiveLevel`、`kSensorBlackLevel`、`kCenterMode`、`kAdcBlackThreshold`、`kAdcHysteresis`、`kSensorSettleControlTicks`（必须 ≥ `LineSensors::kHistoryDepth`，已用 `static_assert` 守门）。
@@ -147,7 +147,7 @@ ObstacleStop（短暂停车）
    - 在 `kBrakeHighSideInversePwm` 模式下，`kMotor*Pwm = 128` ≈ 50% 驱动；`= 255` = 整周期驱动。
    - 本次（ADR-012）巡航 PWM 从 160 → 180，最大限幅从 200 → 220；首跑必须实测 L9110S 温度与电池压降。
 5. **标定遇黑左转 + 避障右转**：两者都是开环按 tick 计时，必须分别在地面上标定到接近期望转角；标定方法相同（轮子离地确认方向 → 落地短时测量 → 写回常量）。
-6. **去抖 trade-off**：若发现"压线才转"，把 `kEncounterConfirmTicks` 从 2 降到 1 关闭去抖（代价是边缘穿越可能误触发）。
+6. **去抖 trade-off**：默认 `kEncounterConfirmTicks = 5`（50 ms）已经偏严苛。若发现"压线才转"，先核对 A0 / A1 是否真能稳定双黑（窗口太短 vs 双边覆盖不足是两类问题）；确认双黑稳定后再把窗口调到 3–4 提高响应。窗口设为 1 关闭去抖（不推荐）。
 
 ## 设计记录
 

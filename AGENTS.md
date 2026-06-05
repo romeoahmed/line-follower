@@ -13,10 +13,14 @@ portable Arduino example. Cross-board portability is not a goal — code may, an
 should, lean on the standard UNO pin map, the ArduinoCore-avr defaults for
 Timer0/Timer2, and the exact wiring captured in `Pins.h`.
 
-Top-level behavior (ADR-012): the car cruises straight by default. When any
-line sensor sees black for `kEncounterConfirmTicks` consecutive control ticks,
-it executes an open-loop calibrated left turn, then resumes straight. The
-ultrasonic obstacle path stays intact and outranks the encounter trigger.
+Top-level behavior (ADR-012, Rev 1): the car cruises straight by default.
+When **both** line sensors see black simultaneously for `kEncounterConfirmTicks`
+consecutive control ticks (i.e. a full line is crossing under the chassis,
+LineState == `kIntersection` / `kCentered`), it executes an open-loop
+calibrated left turn, then resumes straight. Single-sided black readings
+(`kOffsetLeft` / `kOffsetRight`) are explicitly ignored — they're typically
+edge-skim or speckle noise, not a real line. The ultrasonic obstacle path
+stays intact and outranks the encounter trigger.
 
 The control story:
 
@@ -174,11 +178,21 @@ logic does not directly manipulate AVR registers.
   user's calibration against a specific battery / surface / tire combination.
   Do not claim or imply geometric accuracy in code or docs. See ADR-005 +
   ADR-012.
-- **Encounter-turn-left has a confirmation window.** `kGoStraight` only
-  triggers the turn after `kEncounterConfirmTicks` consecutive ticks of "saw
-  black"; a single white reading resets the counter. This is symmetric with
-  `kObstacleConfirmSamples` on the ultrasonic side and prevents edge-crossing
-  noise from triggering spurious turns. See ADR-012.
+- **Encounter trigger is "both sensors black", not "any sensor black".**
+  `estimateSawBlack()` in `RobotController.cpp` returns true only for
+  `LineState::kIntersection` (both sensors black under `kBetweenSensors`) or
+  `kCentered` (both black under `kOnLine`). Single-sided readings
+  (`kOffsetLeft` / `kOffsetRight`) explicitly do not advance the trigger
+  counter. This is the strict interpretation chosen in ADR-012 Rev 1 —
+  reverting to "any sensor" requires editing the switch in
+  `estimateSawBlack` and updating ADR-012, README, and the spec table in
+  lock-step.
+- **Encounter trigger also has a confirmation window.** Even after the
+  "both-sensors-black" predicate matches, `kGoStraight` only fires the turn
+  after `kEncounterConfirmTicks` consecutive ticks of double-black; any
+  other reading resets the counter. Default is 5 (= 50 ms), tuned to
+  swallow reflective speckle and one-frame ADC noise. Setting it to 1
+  disables debouncing.
 - **In-flight turns are uninterruptible.** Once `kEncounterTurnLeft` or
   `kAvoidanceTurnRight` starts, no new event (obstacle latch, line edge)
   preempts it — only state's own tick counter ends it. The priority gate in

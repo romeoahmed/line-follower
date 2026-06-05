@@ -2,8 +2,11 @@
 
 ## Status
 
-Accepted; supersedes ADR-008 in full and supersedes parts of ADR-005, ADR-007,
-ADR-009, ADR-011 — see Supersedes table below for the exact slices.
+Accepted (Revision 1, 2026-06-05: trigger tightened from "any sensor sees
+black" to "both sensors see black"; debounce raised from 2 to 5 ticks —
+see "Revision 1" section at the end of this document); supersedes ADR-008
+in full and supersedes parts of ADR-005, ADR-007, ADR-009, ADR-011 — see
+Supersedes table below for the exact slices.
 
 ## Date
 
@@ -327,3 +330,74 @@ say so. Do not claim compile verification that was not actually performed."：
   datasheet 校验过且未变。
 - avr-libc `<avr/wdt.h>`: 同上；WDT 路径不变。
 - SparkFun HC-SR04 datasheet: 同上；避障路径不变。
+
+---
+
+## Revision 1 — 2026-06-05: 触发严苛化
+
+### Context
+
+ADR-012 初版的 `estimateSawBlack` 把"任一传感器见黑" (`kOffsetLeft` /
+`kOffsetRight` / `kIntersection` / `kCentered`) 都视为遇黑。实际使用反馈是
+**判定过于敏感**：
+
+- 单边偏黑 (`kOffsetLeft` / `kOffsetRight`) 多发生在：车从白底斜插入黑线
+  边缘、车头略偏让一侧传感器先扫到、地面反光斑点、宽白底里偶发深色污渍。
+  这些情形里**整条黑线并没有真正横在车前**，把它们算成"遇到黑线"会让车在
+  不该转的地方触发左转。
+- 默认 `kEncounterConfirmTicks = 2` (20 ms) 在 cruise 180 PWM 下也偏短：
+  教学木地板上的偶发斑点完全可能持续 20–30 ms，去抖窗口太短挡不住。
+
+### Decision
+
+两项收紧：
+
+1. **触发改为「两个传感器都见到黑」**——`estimateSawBlack` 只对 `kIntersection`
+   和 `kCentered` 返回 true；`kOffsetLeft` / `kOffsetRight` 不再触发。
+   - `kBetweenSensors` 模式下，只有 `kIntersection`（两个传感器都看到黑）
+     才算遇到一条完整黑线 / 交叉口。
+   - `kCentered` 仅在 `kOnLine` 模式产出，列为 forward-looking 兼容。
+2. **去抖窗口提高 2 → 5 tick**（`kEncounterConfirmTicks = 5`，= 50 ms）。
+   - cruise 180 PWM 下教学小车典型速度 ~30 cm/s，50 ms ≈ 1.5 cm 位移——
+     既能挡住毫秒级误触发，又不会"压过黑线才转"。
+
+### Rationale
+
+- "两个传感器都见黑"对应"整条黑线在车前"的物理直觉，比"任一见黑"严苛得
+  显著、可解释、可重复。
+- 5 tick 去抖与避障侧 `kObstacleConfirmSamples = 2` 不再对称，因为两者
+  采样频率不同：超声波 60 ms 一次测距，2 帧 = 120 ms；遇黑判定每 10 ms
+  跑一次，5 帧 = 50 ms。两者落在同一时间量级，但配置项各自调到合适的
+  ticks 数才更精确。
+- 触发严苛化和去抖加长**互相补强**而不是冗余：前者解决"判定本身宽松"，
+  后者解决"瞬时噪声穿透判定"。两者一起把误触发的概率乘起来压低。
+
+### Consequences
+
+正面：
+- 误触发显著减少；细黑线 / 反光 / 斑点 / 边缘斜扫不再让车意外转弯。
+- 行为更可预测——"看到一整条黑线才转"和"看到任何一点黑就转"对用户是
+  非常不同的心智模型。
+
+代价：
+- 极细黑线（窄于两个传感器间距）**永远不会被识别为遇黑**——单边偏黑
+  在严苛模式下被丢弃。这是有意为之；如赛道线条太窄，应加宽线条或调小
+  传感器间距，而不是回退触发判定。
+- 真正接近一条黑线时反应延迟从 ~20 ms 涨到 ~50 ms：cruise 180 PWM 下
+  多走 ~1 cm。可以接受。
+- 任何外部"复位/单元测试"如依赖单边触发会失效——本仓库无此类测试。
+
+### Verification
+
+代码侧：
+- `estimateSawBlack` switch 仅对 `kIntersection` / `kCentered` 返回 true。
+- `kEncounterConfirmTicks == 5` + 编译期断言 `>= 1` 仍守门。
+- 静态闸全部仍零回归。
+- 编译验证仍缺失（`arduino-cli` 未安装），按 AGENTS.md 明示。
+
+硬件阶段：
+1. 拖一条 ~2 cm 宽黑线穿过传感器，确认左转触发。
+2. 拖一条 ~1 cm 宽细黑线（只过单边传感器），确认**不**触发。
+3. 木地板上跑 30 s 直行，确认无误触发（反光 / 阴影 / 偶发斑点）。
+4. 若需更严苛，把 `kEncounterConfirmTicks` 调到 8–10；若仍漏触发，则
+   先核对传感器是否真的能稳定输出双黑（窗口太短 vs 窗口太长是两类问题）。
