@@ -9,7 +9,7 @@ constexpr int16_t kMotorMaxPwmSigned = static_cast<int16_t>(RobotConfig::kMotorM
 
 // trim 千分比：scale = 1 + trim/1000；±500 后整除做 round-half-away-from-zero，
 // 避免 ±1 极小命令被 truncate 成 0。这里的 clamp 挡 trim 放大后越限（如 +50%
-// 下 200→300）；不与控制层 mixSaturate 冗余——守不同域（ADR-011 §3）。
+// 下 220→330），守 PWM 包络。
 int16_t applyCompensation(const int16_t value, const int16_t trimPermille) {
   if (value == 0) {
     return 0;
